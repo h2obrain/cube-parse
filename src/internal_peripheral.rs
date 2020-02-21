@@ -28,12 +28,19 @@ pub struct PinSignal {
 }
 
 impl PinSignal {
-    fn get_af_value(&self) -> &str {
-        self.specific_parameter
+    fn get_af_value(&self) -> Result<u8, String> {
+        let af_str = self
+            .specific_parameter
             .possible_value
             .val
             .split('_')
-            .collect::<Vec<_>>()[1]
+            .collect::<Vec<_>>()[1];
+        if &af_str[..2] != "AF" {
+            return Err(format!("Invalid AF value: {}", af_str));
+        }
+        af_str[2..]
+            .parse()
+            .map_err(|e| format!("Could not parse AF value: {}", e))
     }
 }
 
@@ -69,6 +76,24 @@ lazy_static! {
     static ref I2C_SDA: Regex = Regex::new("I2C._SDA").unwrap();
 }
 
+#[derive(Debug, Clone)]
+pub struct AfSignal {
+    pub signal_type: SignalType,
+    pub peripheral: String,
+    pub af: u8,
+}
+
+#[derive(Debug, PartialEq, Eq, Clone, Hash)]
+pub enum SignalType {
+    Rx,
+    Tx,
+    Mosi,
+    Miso,
+    Sck,
+    Sda,
+    Scl,
+}
+
 impl GPIOPin {
     pub fn get_name(&self) -> Option<String> {
         let gpio_pin = self
@@ -84,34 +109,45 @@ impl GPIOPin {
         }
     }
 
-    pub fn get_af_modes(&self) -> Vec<String> {
-        let mut res = Vec::new();
+    pub fn get_af_modes(&self) -> Result<Vec<AfSignal>, String> {
+        let mut res: Vec<AfSignal> = vec![];
         if let Some(ref v) = self.pin_signal {
             for sig in v {
                 let per = sig.name.split('_').collect::<Vec<_>>()[0];
+
+                macro_rules! pin_signal {
+                    ($type:expr) => {
+                        res.push(AfSignal {
+                            signal_type: $type,
+                            peripheral: per.to_string(),
+                            af: sig.get_af_value()?,
+                        });
+                    };
+                }
+
                 if USART_RX.is_match(&sig.name) {
-                    res.push(format!("{}: RxPin<{}>", sig.get_af_value(), per));
+                    pin_signal!(SignalType::Rx);
                 }
                 if USART_TX.is_match(&sig.name) {
-                    res.push(format!("{}: TxPin<{}>", sig.get_af_value(), per));
+                    pin_signal!(SignalType::Tx);
                 }
                 if SPI_MOSI.is_match(&sig.name) {
-                    res.push(format!("{}: MosiPin<{}>", sig.get_af_value(), per));
+                    pin_signal!(SignalType::Mosi);
                 }
                 if SPI_MISO.is_match(&sig.name) {
-                    res.push(format!("{}: MisoPin<{}>", sig.get_af_value(), per));
+                    pin_signal!(SignalType::Miso);
                 }
                 if SPI_SCK.is_match(&sig.name) {
-                    res.push(format!("{}: SckPin<{}>", sig.get_af_value(), per));
+                    pin_signal!(SignalType::Sck);
                 }
                 if I2C_SCL.is_match(&sig.name) {
-                    res.push(format!("{}: SclPin<{}>", sig.get_af_value(), per));
+                    pin_signal!(SignalType::Scl);
                 }
                 if I2C_SDA.is_match(&sig.name) {
-                    res.push(format!("{}: SdaPin<{}>", sig.get_af_value(), per));
+                    pin_signal!(SignalType::Sda);
                 }
             }
         }
-        res
+        Ok(res)
     }
 }

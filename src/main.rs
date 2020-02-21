@@ -10,6 +10,8 @@ mod internal_peripheral;
 mod mcu;
 mod utils;
 
+use internal_peripheral::{AfSignal, SignalType};
+
 #[derive(Debug, PartialEq)]
 enum GenerateTarget {
     PinMappings,
@@ -148,48 +150,82 @@ fn generate_pin_mappings(
         println!("#[cfg(feature = \"{}\")]", gpio_version_feature);
         let gpio_data = internal_peripheral::IpGPIO::load(db_dir, &gpio)
             .map_err(|e| format!("Could not load IP GPIO file: {}", e))?;
-        render_pin_modes(&gpio_data);
+        let signal_mapping = [(SignalType::Rx, "RxPin"), (SignalType::Tx, "TxPin")]
+            .iter()
+            .cloned()
+            .collect::<HashMap<_, _>>();
+        render_pin_modes(&gpio_data, &signal_mapping)?;
         println!("\n");
     }
     Ok(())
 }
 
-fn render_pin_modes(ip: &internal_peripheral::IpGPIO) {
-    let mut pin_map: HashMap<String, Vec<String>> = HashMap::new();
+fn render_pin_mode_item(
+    name: &str,
+    signal: &AfSignal,
+    signal_mapping: &HashMap<SignalType, &'static str>,
+    standalone: bool,
+) {
+    let signal_trait = signal_mapping.get(&signal.signal_type).unwrap();
+    if standalone {
+        println!(
+            "    {} => {{AF{}: {}<{}>}},",
+            name, signal.af, signal_trait, signal.peripheral
+        );
+    } else {
+        println!(
+            "        AF{}: {}<{}>,",
+            signal.af, signal_trait, signal.peripheral
+        );
+    }
+}
+
+fn render_pin_modes(
+    ip: &internal_peripheral::IpGPIO,
+    signal_mapping: &HashMap<SignalType, &'static str>,
+) -> Result<(), String> {
+    let mut pin_map: HashMap<String, Vec<AfSignal>> = HashMap::new();
 
     for p in &ip.gpio_pin {
-        let name = p.get_name();
-        if let Some(n) = name {
-            pin_map.insert(n, p.get_af_modes());
+        if let Some(name) = p.get_name() {
+            pin_map.insert(name, p.get_af_modes()?);
         }
     }
 
     let mut pin_map = pin_map
         .into_iter()
-        .map(|(k, mut v)| {
-            #[allow(clippy::redundant_closure)]
-            v.sort_by(|a, b| compare_str(a, b));
-            (k, v)
+        .map(|(name, mut signals)| {
+            signals.sort_by_key(|x: &AfSignal| x.af);
+            (
+                name,
+                signals
+                    .iter()
+                    .filter(|s: &&AfSignal| signal_mapping.contains_key(&s.signal_type))
+                    .cloned()
+                    .collect::<Vec<_>>(),
+            )
         })
         .collect::<Vec<_>>();
 
     pin_map.sort_by(|a, b| compare_str(&a.0, &b.0));
 
     println!("pins! {{");
-    for (n, af) in pin_map {
-        if af.is_empty() {
+    for (name, signals) in pin_map {
+        if signals.is_empty() {
             continue;
-        } else if af.len() == 1 {
-            println!("    {} => {{{}}},", n, af[0]);
+        } else if signals.len() == 1 {
+            render_pin_mode_item(&name, &signals[0], signal_mapping, true);
         } else {
-            println!("    {} => {{", n);
-            for a in af {
-                println!("        {},", a);
+            println!("    {} => {{", name);
+            for signal in signals {
+                render_pin_mode_item(&name, &signal, signal_mapping, false);
             }
             println!("    }},");
         }
     }
     println!("}}");
+
+    Ok(())
 }
 
 #[cfg(test)]
