@@ -83,7 +83,21 @@ impl GPIOPin {
             None => None,
         }
     }
-
+    
+    const STEM_REGEX: &'static str = "(?P<stem>(I2|USB_OTG_)?[A-Z-]+)";
+    pub fn get_af_modes_by_stem(&self, af_stem: &str) -> Vec<String> {
+        let stem_regex = Regex::new(GPIOPin::STEM_REGEX).unwrap();
+        let mut res = Vec::new();
+        if let Some(ref v) = self.pin_signal {
+            for sig in v {
+                if af_stem == stem_regex.captures(&sig.name).unwrap().name("stem").unwrap().as_str() {
+                    res.push(sig.name.clone()); //push v
+                }
+            }
+        }
+        res
+    }
+    
     pub fn get_af_modes(&self) -> Vec<String> {
         let mut res = Vec::new();
         if let Some(ref v) = self.pin_signal {

@@ -12,6 +12,7 @@ mod utils;
 
 #[derive(Debug, PartialEq)]
 enum GenerateTarget {
+    QueryPinMappings,
     PinMappings,
     Features,
 }
@@ -47,7 +48,7 @@ fn main() -> Result<(), String> {
             Arg::with_name("generate")
                 .help("What to generate")
                 .takes_value(true)
-                .possible_values(&["pin_mappings", "features"])
+                .possible_values(&["pin_mappings", "features", "query"])
                 .required(true),
         )
         .arg(
@@ -56,16 +57,37 @@ fn main() -> Result<(), String> {
                 .takes_value(true)
                 .required(true),
         )
+        .arg(
+            Arg::with_name("mcu")
+                .short("m")
+                .takes_value(true)
+                .help("The (partial) mcu-definition, e.g. \"STM32F429\"")
+                .required(false),
+        )
+        .arg(
+            Arg::with_name("af_stems")
+                .short("f")
+                .takes_value(true)
+                .help("The STEM of the pin-af, e.g. \"TIM\" or \"FMC\"")
+                .multiple(true)
+                .required(false),
+        )
         .get_matches();
 
     // Process args
     let db_dir = Path::new(args.value_of("db_dir").unwrap());
     let mcu_family = args.value_of("mcu_family").unwrap();
     let generate = match args.value_of("generate").unwrap() {
+        "query" => GenerateTarget::QueryPinMappings,
         "pin_mappings" => GenerateTarget::PinMappings,
         "features" => GenerateTarget::Features,
         _ => unreachable!(),
     };
+    let af_stems = match args.values_of("af_stems") {
+        Some(af_stems) => Some(af_stems.collect()),
+        None => None,
+    };
+    //println!("stems: {:?}", af_stems);
 
     // Load families
     let families = family::Families::load(&db_dir)
@@ -112,6 +134,7 @@ fn main() -> Result<(), String> {
             generate_features(&mcu_gpio_map, &mcu_package_map, &mcu_family)?
         }
         GenerateTarget::PinMappings => generate_pin_mappings(&mcu_gpio_map, &db_dir)?,
+        GenerateTarget::QueryPinMappings => query_pin_mappings(&mcu_gpio_map, &db_dir, &af_stems)?,
     };
 
     Ok(())
@@ -272,6 +295,96 @@ fn render_pin_modes(ip: &internal_peripheral::IpGPIO) {
     }
     println!("}}");
 }
+
+/// Query the pin mappings for the target MCU family.
+fn query_pin_mappings(
+    mcu_gpio_map: &HashMap<String, Vec<String>>,
+    db_dir: &Path,
+    af_stems: &Option<Vec<&str>>,
+) -> Result<(), String> {
+    if let Some(af_stems) = af_stems {
+        let mut gpio_versions = mcu_gpio_map.keys().collect::<Vec<_>>();
+        gpio_versions.sort();
+        for gpio in gpio_versions {
+            println!("{:?}",gpio);
+            let gpio_data = internal_peripheral::IpGPIO::load(db_dir, &gpio)
+                .map_err(|e| format!("Could not load IP GPIO file: {}", e))?;
+            query_pin_modes(&gpio_data, af_stems);
+        }
+    }
+    Ok(())
+}
+/*
+/// Copy of generate_features with lots of needded code removed :(
+fn find_mcu_features(
+    mcu_gpio_map: &HashMap<String, Vec<String>>,
+    mcu_package_map: &HashMap<String, String>,
+    mcu_type: &str,
+    package_type: &str,
+) -> Result<(), Vec<String>> {
+    
+    möh :(
+    
+    let mut main_features = mcu_gpio_map
+        .keys()
+        .map(|gpio| gpio_version_to_feature(gpio))
+        .collect::<Result<Vec<String>, String>>()?;
+    main_features.sort();
+    
+    let mcu_features = vec![];
+
+    let pattern = Regex::new(String::join(".*",mcu_type,".*")).unwrap();
+
+    for (gpio, mcu_list) in mcu_gpio_map {
+        for mcu in mcu_list {
+            if pattern.is_match(&mcu) {
+                mcu_features.push(feature.to_string());
+            }
+        }
+    }
+ 
+    Ok(mcu_features)
+}
+*/
+fn query_pin_modes(
+    ip: &internal_peripheral::IpGPIO,
+    af_stems: &Vec<&str>,
+) {
+    
+    for af_stem in af_stems {
+        println!("pins for '{}'", af_stem);
+        
+        let mut pin_map: HashMap<String, Vec<String>> = HashMap::new();
+        for p in &ip.gpio_pin {
+            let name = p.get_name();
+            if let Some(n) = name {
+                for af_mode in p.get_af_modes_by_stem(af_stem) {
+                    if !pin_map.contains_key(&af_mode) {
+                        pin_map.insert(af_mode.clone(), vec![]);
+                    }
+                    pin_map.get_mut(&af_mode).unwrap().push(n.clone());
+                }
+            }
+        }
+
+        let mut pin_map = pin_map
+            .into_iter()
+            .map(|(k, mut v)| {
+                #[allow(clippy::redundant_closure)]
+                v.sort_by(|a, b| compare_str(a, b));
+                (k, v)
+            })
+            .collect::<Vec<_>>();
+
+        pin_map.sort_by(|a, b| compare_str(&a.0, &b.0));
+        
+        for (af, pins) in pin_map {
+            println!(" af:{} pins:{:?}",af,pins)
+        }
+        println!();
+    }
+}
+
 
 #[cfg(test)]
 mod tests {
