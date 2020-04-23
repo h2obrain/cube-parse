@@ -1,6 +1,6 @@
 use std::{collections::HashMap, env, path::Path};
 
-use alphanumeric_sort::compare_str;
+use alphanumeric_sort::{compare_str,sort_str_slice};
 use clap::{App, Arg};
 use lazy_static::lazy_static;
 use regex::Regex;
@@ -300,91 +300,90 @@ fn render_pin_modes(ip: &internal_peripheral::IpGPIO) {
 fn query_pin_mappings(
     mcu_gpio_map: &HashMap<String, Vec<String>>,
     db_dir: &Path,
-    af_stems: &Option<Vec<&str>>,
+    af_stem_selection: &Option<Vec<&str>>,
 ) -> Result<(), String> {
-    if let Some(af_stems) = af_stems {
-        let mut gpio_versions = mcu_gpio_map.keys().collect::<Vec<_>>();
-        gpio_versions.sort();
-        for gpio in gpio_versions {
-            println!("{:?}",gpio);
-            let gpio_data = internal_peripheral::IpGPIO::load(db_dir, &gpio)
-                .map_err(|e| format!("Could not load IP GPIO file: {}", e))?;
-            query_pin_modes(&gpio_data, af_stems);
+    let mut af_tree = HashMap::new();
+    
+    let mut gpio_versions = mcu_gpio_map.keys().collect::<Vec<_>>();
+    gpio_versions.sort();
+    for gpio in gpio_versions {
+        //println!("{:?}",gpio);
+        // TODO filter out mcus here if needed..
+        let gpio_data = internal_peripheral::IpGPIO::load(db_dir, &gpio)
+            .map_err(|e| format!("Could not load IP GPIO file: {}", e))?;
+        
+        for p in gpio_data.gpio_pin {
+            let name = p.get_name();
+            if name.is_some() {
+                p.update_af_tree(gpio, &mut af_tree);
+            }
         }
     }
+    
+//    println!("All stems");
+    let mut af_stems = if let Some(af_stem_selection) = af_stem_selection {
+        af_stem_selection.iter()
+            .map(|m| {
+                let m = (*m).to_string();
+                if af_tree.contains_key(&m) { Ok(m) } else { Err("Invalid stem detected!") }
+            })
+            .collect::<Result<Vec<_>, _>>()?
+    } else {
+        af_tree.keys().cloned().collect::<Vec<_>>()
+    };
+    sort_str_slice(&mut af_stems);
+    for af_stem in af_stems {
+        let mut afs = af_tree[&af_stem].keys().cloned().collect::<Vec<_>>();
+        sort_str_slice(&mut afs);
+        println!("{}", af_stem);
+        //println!("{} ({})", af_stem, afs.join(", "));
+        for af in afs {
+            println!("  {}", af);
+            let mut af_pins = af_tree[&af_stem][&af].keys().cloned().collect::<Vec<_>>();
+            sort_str_slice(&mut af_pins);
+            for af_pin in af_pins {
+                let af_pin_name = convert_to_camel_case(af_pin.as_str()) + "Pin";
+                let mut pins = af_tree[&af_stem][&af][&af_pin].keys().cloned().collect::<Vec<_>>();
+                sort_str_slice(&mut pins);
+                let pin_names = pins.iter().map(|k|format!("{:4}",k)).collect::<Vec<_>>();
+                println!("    {:8} => {:10} =[ {}", af_pin, af_pin_name, pin_names.join(" | "));
+                // for mcu in mcus mcu..
+            }
+        }
+    }
+    
     Ok(())
 }
-/*
-/// Copy of generate_features with lots of needded code removed :(
-fn find_mcu_features(
-    mcu_gpio_map: &HashMap<String, Vec<String>>,
-    mcu_package_map: &HashMap<String, String>,
-    mcu_type: &str,
-    package_type: &str,
-) -> Result<(), Vec<String>> {
-    
-    möh :(
-    
-    let mut main_features = mcu_gpio_map
-        .keys()
-        .map(|gpio| gpio_version_to_feature(gpio))
-        .collect::<Result<Vec<String>, String>>()?;
-    main_features.sort();
-    
-    let mcu_features = vec![];
 
-    let pattern = Regex::new(String::join(".*",mcu_type,".*")).unwrap();
-
-    for (gpio, mcu_list) in mcu_gpio_map {
-        for mcu in mcu_list {
-            if pattern.is_match(&mcu) {
-                mcu_features.push(feature.to_string());
-            }
-        }
+/// Helpers (to be moved..)
+fn convert_to_camel_case(s: &str) -> String {
+    lazy_static! {
+        static ref SEGMENT_RE: Regex = Regex::new(r#"(\d+)|([A-Z])([A-Z]+|[a-z]+)?|([a-z])([a-z]+)?"#).unwrap();
     }
- 
-    Ok(mcu_features)
-}
-*/
-fn query_pin_modes(
-    ip: &internal_peripheral::IpGPIO,
-    af_stems: &Vec<&str>,
-) {
-    
-    for af_stem in af_stems {
-        println!("pins for '{}'", af_stem);
-        
-        let mut pin_map: HashMap<String, Vec<String>> = HashMap::new();
-        for p in &ip.gpio_pin {
-            let name = p.get_name();
-            if let Some(n) = name {
-                for af_mode in p.get_af_modes_by_stem(af_stem) {
-                    if !pin_map.contains_key(&af_mode) {
-                        pin_map.insert(af_mode.clone(), vec![]);
-                    }
-                    pin_map.get_mut(&af_mode).unwrap().push(n.clone());
+    SEGMENT_RE
+        .captures_iter(s)
+        .map(|m| {
+            let mut s;
+            if let Some(r) = m.get(1) { // numbers
+                s  = r.as_str().to_uppercase();
+            } else if let Some(r) = m.get(2) { // big start
+                s  = r.as_str().to_uppercase();
+                if let Some(r) = m.get(3) {
+                    s += &r.as_str().to_lowercase();
                 }
+            } else if let Some(r) = m.get(4) { // little start
+                s  = r.as_str().to_uppercase();
+                if let Some(r) = m.get(5) {
+                    s += &r.as_str().to_lowercase();
+                }
+            } else { // impossible
+                s = "".to_string();
             }
-        }
-
-        let mut pin_map = pin_map
-            .into_iter()
-            .map(|(k, mut v)| {
-                #[allow(clippy::redundant_closure)]
-                v.sort_by(|a, b| compare_str(a, b));
-                (k, v)
-            })
-            .collect::<Vec<_>>();
-
-        pin_map.sort_by(|a, b| compare_str(&a.0, &b.0));
-        
-        for (af, pins) in pin_map {
-            println!(" af:{} pins:{:?}",af,pins)
-        }
-        println!();
-    }
+            s
+        })
+        .collect::<Vec<String>>()
+        .join("")
 }
-
 
 #[cfg(test)]
 mod tests {

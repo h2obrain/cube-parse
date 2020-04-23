@@ -1,5 +1,6 @@
 use std::error::Error;
 use std::path::Path;
+use std::collections::{HashMap,HashSet};
 
 use lazy_static::lazy_static;
 use regex::Regex;
@@ -67,7 +68,11 @@ lazy_static! {
     static ref SPI_SCK: Regex = Regex::new("SPI._SCK").unwrap();
     static ref I2C_SCL: Regex = Regex::new("I2C._SCL").unwrap();
     static ref I2C_SDA: Regex = Regex::new("I2C._SDA").unwrap();
+    
+    static ref STEM_REGEX: Regex = Regex::new(r#"^(?P<af>(?P<af_stem>((FMP)?I2|USB_OTG_)?[A-Z-]+)\d*(ext)?)(_(?P<af_pin>[\w-]+))?$"#).unwrap();
 }
+
+pub type AfDb = HashMap<String,HashMap<String,HashMap<String,HashMap<String,HashSet<String>>>>>;
 
 impl GPIOPin {
     pub fn get_name(&self) -> Option<String> {
@@ -83,21 +88,44 @@ impl GPIOPin {
             None => None,
         }
     }
-    
-    const STEM_REGEX: &'static str = "(?P<stem>(I2|USB_OTG_)?[A-Z-]+)";
-    pub fn get_af_modes_by_stem(&self, af_stem: &str) -> Vec<String> {
-        let stem_regex = Regex::new(GPIOPin::STEM_REGEX).unwrap();
-        let mut res = Vec::new();
+
+    pub fn update_af_tree(
+        &self,
+        gpio_id: &str,
+        af_tree: &mut AfDb,
+    ) {
         if let Some(ref v) = self.pin_signal {
             for sig in v {
-                if af_stem == stem_regex.captures(&sig.name).unwrap().name("stem").unwrap().as_str() {
-                    res.push(sig.name.clone()); //push v
+                let m;
+                match STEM_REGEX.captures(&sig.name) {
+                    Some(m_) => m = m_,
+                    None => {
+                        println!("Error: pin-signal '{:?}' could not be parsed! (ignoring)", sig);
+                        continue;
+                    }
                 }
+                let af_stem = m.name("af_stem").unwrap().as_str().to_string().clone();
+                let af = m.name("af").unwrap().as_str().to_string().clone();
+                let af_pin = if let Some(af_pin) = m.name("af_pin") {
+                    af_pin.as_str().to_string().clone()
+                } else {
+                    // eventout and cec are ignored
+                    if !["EVENTOUT","CEC"].contains(&af_stem.as_str()) {
+                        println!("FIXME: {} ({}) has no af_pin part in its name! (assuming '{}')", af_stem, af, af_stem);
+                    }
+                    af_stem.clone()
+                };
+                af_tree
+                    .entry(af_stem).or_insert_with(HashMap::new)
+                    .entry(af).or_insert_with(HashMap::new)
+                    .entry(af_pin).or_insert_with(HashMap::new)
+                    .entry(self.get_name().unwrap()).or_insert_with(HashSet::new)
+//                    .entry(self.clone()).or_insert_with(HashSet::new)
+                    .insert(gpio_id.to_string());
             }
         }
-        res
     }
-    
+
     pub fn get_af_modes(&self) -> Vec<String> {
         let mut res = Vec::new();
         if let Some(ref v) = self.pin_signal {
