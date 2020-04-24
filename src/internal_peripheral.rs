@@ -89,43 +89,6 @@ impl GPIOPin {
         }
     }
 
-    pub fn update_af_tree(
-        &self,
-        gpio_id: &str,
-        af_tree: &mut AfDb,
-    ) {
-        if let Some(ref v) = self.pin_signal {
-            for sig in v {
-                let m;
-                match STEM_REGEX.captures(&sig.name) {
-                    Some(m_) => m = m_,
-                    None => {
-                        println!("Error: pin-signal '{:?}' could not be parsed! (ignoring)", sig);
-                        continue;
-                    }
-                }
-                let af_stem = m.name("af_stem").unwrap().as_str().to_string().clone();
-                let af = m.name("af").unwrap().as_str().to_string().clone();
-                let af_pin = if let Some(af_pin) = m.name("af_pin") {
-                    af_pin.as_str().to_string().clone()
-                } else {
-                    // eventout and cec are ignored
-                    if !["EVENTOUT","CEC"].contains(&af_stem.as_str()) {
-                        println!("FIXME: {} ({}) has no af_pin part in its name! (assuming '{}')", af_stem, af, af_stem);
-                    }
-                    af_stem.clone()
-                };
-                af_tree
-                    .entry(af_stem).or_insert_with(HashMap::new)
-                    .entry(af).or_insert_with(HashMap::new)
-                    .entry(af_pin).or_insert_with(HashMap::new)
-                    .entry(self.get_name().unwrap()).or_insert_with(HashSet::new)
-//                    .entry(self.clone()).or_insert_with(HashSet::new)
-                    .insert(gpio_id.to_string());
-            }
-        }
-    }
-
     pub fn get_af_modes(&self) -> Vec<String> {
         let mut res = Vec::new();
         if let Some(ref v) = self.pin_signal {
@@ -156,4 +119,42 @@ impl GPIOPin {
         }
         res
     }
+
+    pub fn update_af_tree(
+        &self,
+        gpio_id: &str,
+        af_tree: &mut AfDb,
+    ) {
+        if let Some(ref v) = self.pin_signal {
+            for sig in v {
+                let m;
+                match STEM_REGEX.captures(&sig.name) {
+                    Some(m_) => m = m_,
+                    None => {
+                        eprintln!("FIXME: pin-signal '{:?}' could not be parsed! (ignoring)", sig);
+                        continue;
+                    }
+                }
+                let af_stem = m.name("af_stem").unwrap().as_str().to_string().clone();
+                let af = m.name("af").unwrap().as_str().to_string().clone();
+                let af_pin = if let Some(af_pin) = m.name("af_pin") {
+                    af_pin.as_str().to_string().clone()
+                } else {
+                    // eventout and cec are ignored
+                    if !["EVENTOUT","CEC"].contains(&af_stem.as_str()) {
+                        eprintln!("FIXME: {} ({}) has no af_pin part in its name! (assuming '{}')", af_stem, af, af_stem);
+                    }
+                    af_stem.clone()
+                };
+                af_tree
+                    .entry(af_stem).or_insert_with(HashMap::new)
+                    .entry(af).or_insert_with(HashMap::new)
+                    .entry(af_pin).or_insert_with(HashMap::new)
+                    .entry(self.get_name().unwrap()).or_insert_with(HashSet::new)
+//                    .entry(self.clone()).or_insert_with(HashSet::new)
+                    .insert(gpio_id.to_string());
+            }
+        }
+    }
+
 }

@@ -15,6 +15,7 @@ enum GenerateTarget {
     QueryPinMappings,
     PinMappings,
     Features,
+    PrintFamilies,
 }
 
 lazy_static! {
@@ -48,14 +49,14 @@ fn main() -> Result<(), String> {
             Arg::with_name("generate")
                 .help("What to generate")
                 .takes_value(true)
-                .possible_values(&["pin_mappings", "features", "query"])
-                .required(true),
+                .possible_values(&["query", "pin_mappings", "features", "print_families"])
+                .required(false),
         )
         .arg(
             Arg::with_name("mcu_family")
                 .help("The MCU family to extract, e.g. \"STM32L0\"")
                 .takes_value(true)
-                .required(true),
+                .required(false),
         )
         .arg(
             Arg::with_name("mcu")
@@ -76,22 +77,39 @@ fn main() -> Result<(), String> {
 
     // Process args
     let db_dir = Path::new(args.value_of("db_dir").unwrap());
-    let mcu_family = args.value_of("mcu_family").unwrap();
+    let mcu_family = args.value_of("mcu_family");
     let generate = match args.value_of("generate").unwrap() {
         "query" => GenerateTarget::QueryPinMappings,
         "pin_mappings" => GenerateTarget::PinMappings,
         "features" => GenerateTarget::Features,
+        "print_families" => GenerateTarget::PrintFamilies,
         _ => unreachable!(),
     };
     let af_stems = match args.values_of("af_stems") {
         Some(af_stems) => Some(af_stems.collect()),
         None => None,
     };
-    //println!("stems: {:?}", af_stems);
 
     // Load families
     let families = family::Families::load(&db_dir)
         .map_err(|e| format!("Could not load families XML: {}", e))?;
+
+    // Print families
+    if generate == GenerateTarget::PrintFamilies {
+        //println!("Available mcu families:");
+        for family in families.into_iter() {
+            println!("  {}", family.name);
+        }
+        //println!();
+        std::process::exit(0);
+    }
+    
+    // Todo fix this..
+    if !mcu_family.is_some() {
+        eprintln!("mcu_family was not defined!");
+        std::process::exit(0);
+    }
+    let mcu_family = mcu_family.unwrap();
 
     // Find target family
     let family = (&families)
@@ -135,6 +153,7 @@ fn main() -> Result<(), String> {
         }
         GenerateTarget::PinMappings => generate_pin_mappings(&mcu_gpio_map, &db_dir)?,
         GenerateTarget::QueryPinMappings => query_pin_mappings(&mcu_gpio_map, &db_dir, &af_stems)?,
+        GenerateTarget::PrintFamilies => (), // this point is never reached! 
     };
 
     Ok(())
