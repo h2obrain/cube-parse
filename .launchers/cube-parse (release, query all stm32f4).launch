@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<launchConfiguration type="org.eclipse.corrosion.run.CargoRunDelegate">
+<stringAttribute key="ARGUMENTS" value="query STM32F4 -d ${env_var:HOME}/STM32CubeMX/db/mcu"/>
+<stringAttribute key="OPTIONS" value=" --release"/>
+<stringAttribute key="PROJECT" value="cube-parse"/>
+<stringAttribute key="WORKING_DIRECTORY" value="cube-parse"/>
+<stringAttribute key="bad_container_name" value="/cube-parse/.la"/>
+<listAttribute key="org.eclipse.debug.ui.favoriteGroups">
+<listEntry value="org.eclipse.debug.ui.launchGroup.run"/>
+</listAttribute>
+</launchConfiguration>
