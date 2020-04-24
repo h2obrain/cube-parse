@@ -72,7 +72,14 @@ lazy_static! {
     static ref STEM_REGEX: Regex = Regex::new(r#"^(?P<af>(?P<af_stem>((FMP)?I2|USB_OTG_)?[A-Z-]+)\d*(ext)?)(_(?P<af_pin>[\w-]+))?$"#).unwrap();
 }
 
-pub type AfDb = HashMap<String,HashMap<String,HashMap<String,HashMap<String,HashSet<String>>>>>;
+
+//pub type AfTree = HashMap<String,HashMap<String,HashMap<String,HashMap<String,HashSet<String>>>>>;
+pub type AfTree = HashMap<String, AfTreeAfStem>;
+pub type AfTreeAfStem = HashMap<String, AfTreeAf>;
+pub type AfTreeAf = HashMap<String, AfTreeAfPin>;
+pub type AfTreeAfPin = HashMap<String, AfTreePin>;
+pub type AfTreePin = HashSet<AfTreeGpio>;
+pub type AfTreeGpio = String;
 
 impl GPIOPin {
     pub fn get_name(&self) -> Option<String> {
@@ -123,7 +130,7 @@ impl GPIOPin {
     pub fn update_af_tree(
         &self,
         gpio_id: &str,
-        af_tree: &mut AfDb,
+        af_tree: &mut AfTree,
     ) {
         if let Some(ref v) = self.pin_signal {
             for sig in v {
@@ -147,10 +154,10 @@ impl GPIOPin {
                     af_stem.clone()
                 };
                 af_tree
-                    .entry(af_stem).or_insert_with(HashMap::new)
-                    .entry(af).or_insert_with(HashMap::new)
-                    .entry(af_pin).or_insert_with(HashMap::new)
-                    .entry(self.get_name().unwrap()).or_insert_with(HashSet::new)
+                    .entry(af_stem).or_insert_with(AfTreeAfStem::new)
+                    .entry(af).or_insert_with(AfTreeAf::new)
+                    .entry(af_pin).or_insert_with(AfTreeAfPin::new)
+                    .entry(self.get_name().unwrap()).or_insert_with(AfTreePin::new)
 //                    .entry(self.clone()).or_insert_with(HashSet::new)
                     .insert(gpio_id.to_string());
             }

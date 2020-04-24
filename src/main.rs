@@ -321,7 +321,7 @@ fn query_pin_mappings(
     db_dir: &Path,
     af_stem_selection: &Option<Vec<&str>>,
 ) -> Result<(), String> {
-    let mut af_tree = HashMap::new();
+    let mut af_tree = internal_peripheral::AfTree::new();
     
     let mut gpio_versions = mcu_gpio_map.keys().collect::<Vec<_>>();
     gpio_versions.sort();
