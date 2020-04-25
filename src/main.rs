@@ -1,6 +1,6 @@
 use std::{collections::HashMap, env, path::Path};
 
-use alphanumeric_sort::{compare_str,sort_str_slice};
+use alphanumeric_sort::compare_str;
 use clap::{App, Arg};
 use lazy_static::lazy_static;
 use regex::Regex;
@@ -9,6 +9,8 @@ mod family;
 mod internal_peripheral;
 mod mcu;
 mod utils;
+
+use utils::ToPascalCase;
 
 #[derive(Debug, PartialEq)]
 enum GenerateTarget {
@@ -148,11 +150,15 @@ fn main() -> Result<(), String> {
     }
 
     match generate {
-        GenerateTarget::Features => {
-            generate_features(&mcu_gpio_map, &mcu_package_map, &mcu_family)?
-        }
-        GenerateTarget::PinMappings => generate_pin_mappings(&mcu_gpio_map, &db_dir)?,
-        GenerateTarget::QueryPinMappings => query_pin_mappings(&mcu_gpio_map, &db_dir, &af_stems)?,
+        GenerateTarget::Features => generate_features(&mcu_gpio_map, &mcu_package_map, &mcu_family)?,
+        GenerateTarget::PinMappings => {
+            let af_tree = internal_peripheral::AfTree::build(&mcu_gpio_map, &db_dir)?;
+            generate_pin_mappings(&af_tree, &af_stems)?;
+        },
+        GenerateTarget::QueryPinMappings => {
+            let af_tree = internal_peripheral::AfTree::build(&mcu_gpio_map, &db_dir)?;
+            display_af_tree(&af_tree, &af_stems, false)?;
+        },
         GenerateTarget::PrintFamilies => (), // this point is never reached! 
     };
 
@@ -192,6 +198,7 @@ fn generate_features(
     let mut mcu_aliases = vec![];
     for (gpio, mcu_list) in mcu_gpio_map {
         let gpio_version_feature = gpio_version_to_feature(gpio).unwrap();
+        println!("gpio_version_feature: {:?} {:?}", gpio, mcu_list);
         for mcu in mcu_list {
             let mut dependencies = vec![];
 
@@ -259,149 +266,139 @@ fn generate_features(
     Ok(())
 }
 
-/// Generate the pin mappings for the target MCU family.
-fn generate_pin_mappings(
-    mcu_gpio_map: &HashMap<String, Vec<String>>,
-    db_dir: &Path,
+/// Display/query pin mappings from the AfTree.
+fn display_af_tree(
+    af_tree: &internal_peripheral::AfTree,
+    af_stem_selection: &Option<Vec<&str>>,
+    verbose: bool,
 ) -> Result<(), String> {
-    let mut gpio_versions = mcu_gpio_map.keys().collect::<Vec<_>>();
-    gpio_versions.sort();
-    for gpio in gpio_versions {
-        let gpio_version_feature = gpio_version_to_feature(&gpio)?;
-        println!("#[cfg(feature = \"{}\")]", gpio_version_feature);
-        let gpio_data = internal_peripheral::IpGPIO::load(db_dir, &gpio)
-            .map_err(|e| format!("Could not load IP GPIO file: {}", e))?;
-        render_pin_modes(&gpio_data);
-        println!("\n");
+    for (stem,dev_map) in af_tree.iter(af_stem_selection)? {
+        println!("{}", stem);
+        for (dev,io_map) in dev_map {
+            println!("  {}", dev);
+            for ((af,io),(io_name,pin_map)) in io_map {
+                if !verbose {
+                    let pin_names = pin_map.keys().map(|k|format!("{:4}",k)).collect::<Vec<_>>();
+                    println!("    {:4}: {:10} == {:8} =[ {}", af, io_name, io, pin_names.join(" | "));
+                } else {
+                    println!("    {:4}: {} ({})", af, io_name, io);
+                    for (pin,(_pin_letter,_pin_number,gpio_map)) in pin_map {
+                        println!("      {}", pin);
+                        for (gpio_mcu,versions) in gpio_map {
+                            println!("        gpio-group: {}", gpio_mcu);
+                            #[allow(clippy::never_loop)]
+                            for (version,mcus) in versions {
+                                println!("        gpio-version: {}", version);
+                                for mcu in (*mcus).iter() {
+                                    println!("          {}", mcu);
+                                }
+                                // fixme
+                                if versions.len() > 1 {
+                                    eprintln!("Multiple gpio-versions not supported! {:?}", versions.keys());
+                                }
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
     Ok(())
 }
 
-fn render_pin_modes(ip: &internal_peripheral::IpGPIO) {
-    let mut pin_map: HashMap<String, Vec<String>> = HashMap::new();
-
-    for p in &ip.gpio_pin {
-        let name = p.get_name();
-        if let Some(n) = name {
-            pin_map.insert(n, p.get_af_modes());
-        }
-    }
-
-    let mut pin_map = pin_map
-        .into_iter()
-        .map(|(k, mut v)| {
-            #[allow(clippy::redundant_closure)]
-            v.sort_by(|a, b| compare_str(a, b));
-            (k, v)
-        })
-        .collect::<Vec<_>>();
-
-    pin_map.sort_by(|a, b| compare_str(&a.0, &b.0));
-
-    println!("pins! {{");
-    for (n, af) in pin_map {
-        if af.is_empty() {
-            continue;
-        } else if af.len() == 1 {
-            println!("    {} => {{{}}},", n, af[0]);
-        } else {
-            println!("    {} => {{", n);
-            for a in af {
-                println!("        {},", a);
-            }
-            println!("    }},");
-        }
-    }
-    println!("}}");
-}
-
-/// Query the pin mappings for the target MCU family.
-fn query_pin_mappings(
-    mcu_gpio_map: &HashMap<String, Vec<String>>,
-    db_dir: &Path,
+/// Generate the pin mappings for the AfTree.
+fn generate_pin_mappings(
+    af_tree: &internal_peripheral::AfTree,
     af_stem_selection: &Option<Vec<&str>>,
 ) -> Result<(), String> {
-    let mut af_tree = internal_peripheral::AfTree::new();
+    // TODO maybe add build_tree(do-not-distinguish-af) mode for uses:String
     
-    let mut gpio_versions = mcu_gpio_map.keys().collect::<Vec<_>>();
-    gpio_versions.sort();
-    for gpio in gpio_versions {
-        //println!("{:?}",gpio);
-        // TODO filter out mcus here if needed..
-        let gpio_data = internal_peripheral::IpGPIO::load(db_dir, &gpio)
-            .map_err(|e| format!("Could not load IP GPIO file: {}", e))?;
+    for (stem,dev_map) in af_tree.iter(af_stem_selection)? {
+        let mut uses = String::new();
+        let mut traits = String::new();
+        let mut ios:Vec<&str> = Vec::new();
+        let mut pins_where = String::new();
+        let mut implementations = String::new();
         
-        for p in gpio_data.gpio_pin {
-            let name = p.get_name();
-            if name.is_some() {
-                p.update_af_tree(gpio, &mut af_tree);
+        let stem = stem.as_str().to_pascalcase();
+        traits.push_str(format!("pub trait Pins<{}> {{}}\n", stem).as_str());
+        
+        for (dev,io_map) in dev_map {
+            for ((af,io),(io_name,pin_map)) in io_map {
+                traits.push_str(format!("pub trait {}<{}> {{}}\n", io_name,stem).as_str());
+                ios.push(io.as_str());
+                pins_where.push_str(format!("    {}: {}<{}>,\n", io, io_name, stem).as_str());
+                for (pin,(pin_letter,_pin_number,gpio_map)) in pin_map {
+                    let mut feature_selection = "#[cfg(any(\n".to_string();
+//                    for (gpio_mcu,versions) in gpio_map {
+                    for versions in gpio_map.values() {
+                        #[allow(clippy::never_loop)]
+//                        for (version,mcus) in versions {
+                        for mcus in versions.values() {
+                            for mcu in (*mcus).iter() {
+                                feature_selection.push_str(format!("    feature = \"{}\",\n", mcu).as_str());
+                            }
+                            // fixme
+                            if versions.len() > 1 {
+                                eprintln!("Multiple gpio-versions not supported! {:?}", versions.keys());
+                            }
+                            break;
+                        }
+                    }
+                    feature_selection.push_str("))]");
+                    
+                    // uses
+//                    uses.push_str(format!("
+//{}
+//use crate::gpio::gpio{}::{};
+//",
+//                        feature_selection,
+//                        pin_letter.to_lowercase(),
+//                        pin
+//                    ).as_str());
+//
+//                    // implementations
+//                    implementations.push_str(format!("
+//{}
+//impl {}<{}> for {}<{}> {{}}
+//",
+//                        feature_selection,
+//                        io_name, dev, pin, af
+//                    ).as_str());
+//                }
+//            }
+//        }
+//    }
+
+                    // implementations
+                    implementations.push_str(format!("
+{}
+impl {}<{}> for gpio::gpio{}::{}<gpio::{}> {{}}
+",
+                        feature_selection,
+                        io_name, dev, pin_letter.to_lowercase(), pin, af
+                    ).as_str());
+                }
             }
         }
-    }
-    
-//    println!("All stems");
-    let mut af_stems = if let Some(af_stem_selection) = af_stem_selection {
-        af_stem_selection.iter()
-            .map(|m| {
-                let m = (*m).to_string();
-                if af_tree.contains_key(&m) { Ok(m) } else { Err("Invalid stem detected!") }
-            })
-            .collect::<Result<Vec<_>, _>>()?
-    } else {
-        af_tree.keys().cloned().collect::<Vec<_>>()
-    };
-    sort_str_slice(&mut af_stems);
-    for af_stem in af_stems {
-        let mut afs = af_tree[&af_stem].keys().cloned().collect::<Vec<_>>();
-        sort_str_slice(&mut afs);
-        println!("{}", af_stem);
-        //println!("{} ({})", af_stem, afs.join(", "));
-        for af in afs {
-            println!("  {}", af);
-            let mut af_pins = af_tree[&af_stem][&af].keys().cloned().collect::<Vec<_>>();
-            sort_str_slice(&mut af_pins);
-            for af_pin in af_pins {
-                let af_pin_name = convert_to_camel_case(af_pin.as_str()) + "Pin";
-                let mut pins = af_tree[&af_stem][&af][&af_pin].keys().cloned().collect::<Vec<_>>();
-                sort_str_slice(&mut pins);
-                let pin_names = pins.iter().map(|k|format!("{:4}",k)).collect::<Vec<_>>();
-                println!("    {:8} => {:10} =[ {}", af_pin, af_pin_name, pin_names.join(" | "));
-                // for mcu in mcus mcu..
-            }
-        }
+        
+        let ios = ios.join(", ");
+        let pins = format!("
+impl<{}, {}> Pins<{}> for ({})
+where
+{}{{}}",
+            stem, ios, stem, ios, pins_where
+        );
+        
+        uses.push_str("use crate::gpio;\n\n");
+        println!("\n############################################\n{}", uses);
+        println!("\n############################################\n{}", traits);
+        println!("\n############################################\n{}", pins);
+        println!("\n############################################\n{}", implementations);
     }
     
     Ok(())
-}
-
-/// Helpers (to be moved..)
-fn convert_to_camel_case(s: &str) -> String {
-    lazy_static! {
-        static ref SEGMENT_RE: Regex = Regex::new(r#"(\d+)|([A-Z])([A-Z]+|[a-z]+)?|([a-z])([a-z]+)?"#).unwrap();
-    }
-    SEGMENT_RE
-        .captures_iter(s)
-        .map(|m| {
-            let mut s;
-            if let Some(r) = m.get(1) { // numbers
-                s  = r.as_str().to_uppercase();
-            } else if let Some(r) = m.get(2) { // big start
-                s  = r.as_str().to_uppercase();
-                if let Some(r) = m.get(3) {
-                    s += &r.as_str().to_lowercase();
-                }
-            } else if let Some(r) = m.get(4) { // little start
-                s  = r.as_str().to_uppercase();
-                if let Some(r) = m.get(5) {
-                    s += &r.as_str().to_lowercase();
-                }
-            } else { // impossible
-                s = "".to_string();
-            }
-            s
-        })
-        .collect::<Vec<String>>()
-        .join("")
 }
 
 #[cfg(test)]

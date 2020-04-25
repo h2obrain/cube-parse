@@ -1,18 +1,20 @@
 use std::error::Error;
 use std::path::Path;
-use std::collections::{HashMap,HashSet};
+use std::collections::{HashMap,BTreeMap,BTreeSet};
+use std::rc::Rc;
 
 use lazy_static::lazy_static;
 use regex::Regex;
 use serde_derive::Deserialize;
 
-use crate::utils::load_file;
+use crate::utils::{load_file,ToPascalCase,SortedString,ToSortedString};
 
 #[derive(Debug, Deserialize)]
 pub(crate) struct PossibleValue {
     #[serde(rename = "$value")]
     pub(crate) val: String,
 }
+
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "PascalCase")]
@@ -28,15 +30,16 @@ pub struct PinSignal {
     specific_parameter: SpecificParameter,
 }
 
-impl PinSignal {
-    fn get_af_value(&self) -> &str {
-        self.specific_parameter
-            .possible_value
-            .val
-            .split('_')
-            .collect::<Vec<_>>()[1]
-    }
-}
+// TODO move GPIO_LETTER_REGEX/STEM_REGEX/AF_REGEX stuff here (see below)
+//impl PinSignal {
+//    fn get_af_value(&self) -> &str {
+//        self.specific_parameter
+//            .possible_value
+//            .val
+//            .split('_')
+//            .collect::<Vec<_>>()[1]
+//    }
+//}
 
 #[derive(Debug, Deserialize)]
 #[serde(rename = "GPIO_Pin", rename_all = "PascalCase")]
@@ -60,26 +63,130 @@ impl IpGPIO {
     }
 }
 
-lazy_static! {
-    static ref USART_RX: Regex = Regex::new("(LP)?US?ART._RX").unwrap();
-    static ref USART_TX: Regex = Regex::new("(LP)?US?ART._TX").unwrap();
-    static ref SPI_MOSI: Regex = Regex::new("SPI._MOSI").unwrap();
-    static ref SPI_MISO: Regex = Regex::new("SPI._MISO").unwrap();
-    static ref SPI_SCK: Regex = Regex::new("SPI._SCK").unwrap();
-    static ref I2C_SCL: Regex = Regex::new("I2C._SCL").unwrap();
-    static ref I2C_SDA: Regex = Regex::new("I2C._SDA").unwrap();
-    
-    static ref STEM_REGEX: Regex = Regex::new(r#"^(?P<af>(?P<af_stem>((FMP)?I2|USB_OTG_)?[A-Z-]+)\d*(ext)?)(_(?P<af_pin>[\w-]+))?$"#).unwrap();
+/// AfTree
+///  TODO: replace tuple-types 
+pub struct AfTree {
+    mcu_gpio_map: AfTreeGpios,
+    tree: AfTreeStems,
 }
+// stems
+pub type AfTreeStems = BTreeMap<SortedString, AfTreeDevs>;
+// devices (aka internal peripherals)
+pub type AfTreeDevs = BTreeMap<SortedString, AfTreeIos>;
+// device io, key:(af,io) value:(io-name,pin-map)
+pub type AfTreeIos = BTreeMap<(SortedString,SortedString), (String,AfTreePins)>;
+// pins, key:pin value:(pin-letter,pin-number,mcu-map)
+pub type AfTreePins = BTreeMap<SortedString, (String,String,AfTreeGpios)>;
+// gpios, key:gpio-mcu-name value:gpio-versions
+pub type AfTreeGpios = BTreeMap<SortedString, AfTreeGpioVersions>;
+// gpios, key:gpio-version value:mcus
+pub type AfTreeGpioVersions = BTreeMap<SortedString, Rc<AfTreeMcus>>;
+// mcus related to gpio
+pub type AfTreeMcus = BTreeSet<SortedString>;
 
-
-//pub type AfTree = HashMap<String,HashMap<String,HashMap<String,HashMap<String,HashSet<String>>>>>;
-pub type AfTree = HashMap<String, AfTreeAfStem>;
-pub type AfTreeAfStem = HashMap<String, AfTreeAf>;
-pub type AfTreeAf = HashMap<String, AfTreeAfPin>;
-pub type AfTreeAfPin = HashMap<String, AfTreePin>;
-pub type AfTreePin = HashSet<AfTreeGpio>;
-pub type AfTreeGpio = String;
+impl AfTree {
+    pub fn new() -> Self {
+        AfTree {
+            mcu_gpio_map: AfTreeGpios::new(),
+            tree: AfTreeStems::new()
+        }
+    }
+    pub fn build(
+        mcu_gpio_map: &HashMap<String, Vec<String>>,
+        db_dir: &Path,
+    ) -> Result<Self, String> {
+        let mut af = AfTree::new();
+    
+        lazy_static! {
+            static ref GPIO_REGEX: Regex = Regex::new(r#"^(?P<gpio>[a-zA-Z0-9]+)_(?P<version>gpio_\w+)$"#).unwrap();
+            static ref MCUS_REGEX: Regex = Regex::new(r#"^(?P<mcu>STM32[A-Z]+[0-9]+)[A-Za-z][A-Za-z0-9]+$"#).unwrap();
+        }
+        
+        for (gpio, mcus) in mcu_gpio_map {
+            //println!("{:?}",gpio);
+            // TODO filter out mcus here if needed..
+            let gpio_data;
+            match IpGPIO::load(db_dir, &gpio) {
+                Ok(gd) => gpio_data = gd,
+                Err(e) => {
+                    eprintln!("Could not load IP GPIO file: {}", e);
+                    continue; // warn only
+                }
+            }
+            
+            let gpio_mcu;
+            let gpio_version;
+            match GPIO_REGEX.captures(gpio) {
+                Some(m) => {
+                    gpio_mcu = m.name("gpio").unwrap().as_str();
+                    gpio_version = m.name("version").unwrap().as_str();
+                },
+                None => {
+                    eprintln!("FIXME: gpio-version '{}' could not be parsed to (gpio)_gpio_(version)! (ignoring)", gpio);
+                    continue; // warn only
+                }
+            }
+            
+            let mut mcus_simplified: AfTreeMcus = AfTreeMcus::new();
+            for mcu in mcus {
+                match MCUS_REGEX.captures(mcu) {
+                    Some(m) => {
+                        mcus_simplified.insert(m.name("mcu").unwrap().as_str().to_lowercase().to_sorted_string());
+                    },
+                    None => {
+                        eprintln!("FIXME: gpio-mcu '{}' could not be parsed to (STM32[LF..]xxx)YYY! (ignoring)", mcu);
+                        continue; // warn only
+                    }
+                }
+            }
+            
+            let mcus_simplified = Rc::new(mcus_simplified);
+            
+            let duplicated = af.mcu_gpio_map
+                .entry(gpio_mcu.to_sorted_string()).or_insert_with(AfTreeGpioVersions::new)
+                .insert(gpio_version.to_sorted_string(), mcus_simplified.clone());
+            if duplicated.is_some() {
+                eprintln!("FIXME: gpio '{}/{}' is duplicated! (ignoring)", gpio_mcu, gpio_version);
+                // warn only
+            }
+            
+            for p in gpio_data.gpio_pin {
+                let name = p.get_name();
+                if name.is_some() {
+                    p.update_af_tree(&gpio_mcu, &gpio_version, mcus_simplified.clone(), &mut af.tree);
+                }
+            }
+        }
+        Ok(af)
+    }
+//    pub fn iter(&self, stem_selection: &Option<Vec<&str>>) -> Result<btree_map.Iter<SortedString, AfTreeDevs>, String> {
+    pub fn iter(
+        &self,
+        stem_selection: &Option<Vec<&str>>,
+    ) -> Result<impl Iterator<Item = (&SortedString, &AfTreeDevs)>, String>
+    {
+        // TODO ask someone how to do this correctly :)
+        let sel: Vec<SortedString>;
+        if let Some(stem_selection) = stem_selection {
+            sel = stem_selection.iter().map(|m| m.to_sorted_string()).collect();
+            // check selection
+            let invalid_stems = sel.iter()
+                .filter(|stem|{
+                    !self.tree.contains_key(&stem)
+                })
+                .map(|stem| stem.to_string())
+                .collect::<Vec<_>>();
+            if !invalid_stems.is_empty() {
+                return Err(format!("Invalid stem{} detected! ({})",
+                    if invalid_stems.len() == 1 { "" } else { "s" },
+                    invalid_stems.join("','")))
+            };
+        } else {
+            sel = self.tree.keys().cloned().collect();
+        }
+        Ok(self.tree.iter().filter(move |(k,_v)| sel.contains(&k)))
+    }
+}
 
 impl GPIOPin {
     pub fn get_name(&self) -> Option<String> {
@@ -96,70 +203,85 @@ impl GPIOPin {
         }
     }
 
-    pub fn get_af_modes(&self) -> Vec<String> {
-        let mut res = Vec::new();
-        if let Some(ref v) = self.pin_signal {
-            for sig in v {
-                let per = sig.name.split('_').collect::<Vec<_>>()[0];
-                if USART_RX.is_match(&sig.name) {
-                    res.push(format!("{}: RxPin<{}>", sig.get_af_value(), per));
-                }
-                if USART_TX.is_match(&sig.name) {
-                    res.push(format!("{}: TxPin<{}>", sig.get_af_value(), per));
-                }
-                if SPI_MOSI.is_match(&sig.name) {
-                    res.push(format!("{}: MosiPin<{}>", sig.get_af_value(), per));
-                }
-                if SPI_MISO.is_match(&sig.name) {
-                    res.push(format!("{}: MisoPin<{}>", sig.get_af_value(), per));
-                }
-                if SPI_SCK.is_match(&sig.name) {
-                    res.push(format!("{}: SckPin<{}>", sig.get_af_value(), per));
-                }
-                if I2C_SCL.is_match(&sig.name) {
-                    res.push(format!("{}: SclPin<{}>", sig.get_af_value(), per));
-                }
-                if I2C_SDA.is_match(&sig.name) {
-                    res.push(format!("{}: SdaPin<{}>", sig.get_af_value(), per));
-                }
-            }
-        }
-        res
-    }
-
     pub fn update_af_tree(
         &self,
-        gpio_id: &str,
-        af_tree: &mut AfTree,
+        gpio_mcu: &str,
+        gpio_version: &str,
+        mcus: Rc<AfTreeMcus>,
+        af_tree: &mut AfTreeStems,
     ) {
+        lazy_static! {
+            static ref STEM_REGEX: Regex = Regex::new(
+                r#"^(?P<dev>(?P<stem>((FMP)?I2|USB_OTG_)?[A-Z-]+)\d*(ext)?)(_(?P<io>[\w-]+))?$"#
+            ).unwrap();
+            static ref AF_REGEX: Regex = Regex::new(r#"^GPIO_(?P<af>[a-zA-Z\d]+)_\w+$"#).unwrap();
+            static ref GPIO_LETTER_REGEX: Regex = Regex::new(r#"^P(?P<letter>[a-zA-Z]+)(?P<number>\d+)$"#).unwrap();
+        }
+
+        
         if let Some(ref v) = self.pin_signal {
             for sig in v {
                 let m;
                 match STEM_REGEX.captures(&sig.name) {
                     Some(m_) => m = m_,
                     None => {
-                        eprintln!("FIXME: pin-signal '{:?}' could not be parsed! (ignoring)", sig);
+                        eprintln!("FIXME: pin-signal '{}' could not be parsed! (ignoring)", sig.name);
                         continue;
                     }
                 }
-                let af_stem = m.name("af_stem").unwrap().as_str().to_string().clone();
-                let af = m.name("af").unwrap().as_str().to_string().clone();
-                let af_pin = if let Some(af_pin) = m.name("af_pin") {
-                    af_pin.as_str().to_string().clone()
-                } else {
-                    // eventout and cec are ignored
-                    if !["EVENTOUT","CEC"].contains(&af_stem.as_str()) {
-                        eprintln!("FIXME: {} ({}) has no af_pin part in its name! (assuming '{}')", af_stem, af, af_stem);
+//                let af = sig.get_af_value().to_sorted_string();
+                let af;
+                match AF_REGEX.captures(&sig.specific_parameter.possible_value.val) {
+                    Some(m) => af = m.name("af").unwrap().as_str().to_sorted_string(),
+                    None => {
+                        eprintln!(
+                            "FIXME: af-pin-signal '{}' could not be parsed! (ignoring)",
+                            sig.specific_parameter.possible_value.val
+                        );
+                        continue;
                     }
-                    af_stem.clone()
-                };
-                af_tree
-                    .entry(af_stem).or_insert_with(AfTreeAfStem::new)
-                    .entry(af).or_insert_with(AfTreeAf::new)
-                    .entry(af_pin).or_insert_with(AfTreeAfPin::new)
-                    .entry(self.get_name().unwrap()).or_insert_with(AfTreePin::new)
-//                    .entry(self.clone()).or_insert_with(HashSet::new)
-                    .insert(gpio_id.to_string());
+                }
+                                
+                let stem = m.name("stem").unwrap().as_str().to_sorted_string();
+                let dev = m.name("dev").unwrap().as_str().to_sorted_string();
+                let io = if let Some(io) = m.name("io") {
+                        io.as_str().to_sorted_string()
+                    } else {
+                        // eventout and cec are ignored
+                        if !["EVENTOUT","CEC"].contains(&stem.as_str()) {
+                            eprintln!("FIXME: {} ({}) has no io part in its name! (assuming '{}')", stem, dev, stem);
+                        }
+                        stem.clone()
+                    };
+                let io_name = "Pin".to_string() + io.as_str().to_pascalcase().as_str();
+                let pin = self.get_name().unwrap().to_sorted_string();
+                
+                // This is only needed for a new pin
+                let pin_letter;
+                let pin_number;
+                match GPIO_LETTER_REGEX.captures(pin.as_str()) {
+                    Some(m) => {
+                        pin_letter = m.name("letter").unwrap().as_str().to_string();
+                        pin_number = m.name("number").unwrap().as_str().to_string();
+                    },
+                    None => {
+                        eprintln!("FIXME: pin '{}' could not be parsed to P(letter)(number)! (ignoring)", pin);
+                        continue; // warn only
+                    }
+                }
+                                
+                let duplicated = af_tree
+                    .entry(stem).or_insert_with(AfTreeDevs::new)
+                    .entry(dev).or_insert_with(AfTreeIos::new)
+                    .entry((af,io)).or_insert_with(||(io_name,AfTreePins::new())).1
+                    .entry(pin).or_insert_with(||(pin_letter,pin_number,AfTreeGpios::new())).2
+                    .entry(gpio_mcu.to_sorted_string()).or_insert_with(AfTreeGpioVersions::new)
+                    .insert(gpio_version.to_sorted_string(), mcus.clone());
+                
+                if duplicated.is_some() {
+                    eprintln!("FIXME: gpio '{}/{}' is duplicated! (ignoring)", gpio_mcu, gpio_version);
+                    // warn only
+                }
             }
         }
     }
