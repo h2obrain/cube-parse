@@ -315,7 +315,6 @@ fn generate_pin_mappings(
     // TODO maybe add build_tree(do-not-distinguish-af) mode for uses:String
     
     for (stem,dev_map) in af_tree.iter(af_stem_selection)? {
-        let mut uses = String::new();
         let mut traits = String::new();
         let mut ios:Vec<&str> = Vec::new();
         let mut pins_where = String::new();
@@ -324,6 +323,23 @@ fn generate_pin_mappings(
         let stem = stem.as_str().to_pascalcase();
         traits.push_str(format!("pub trait Pins<{}> {{}}\n", stem).as_str());
         
+        implementations.push_str("
+use crate::gpio;\n\n
+
+macro_rules! pins {{
+    ($($PIN:ident => {{
+        $($AF:ty: $TRAIT:ty),+
+    }}),+) => {{
+        $(
+            $(
+                impl $TRAIT for $PIN<Alternate<$AF>> {{}}
+            )+
+        )+
+    }}
+}}
+
+");
+
         for (dev,io_map) in dev_map {
             for ((af,io),(io_name,pin_map)) in io_map {
                 traits.push_str(format!("pub trait {}<{}> {{}}\n", io_name,stem).as_str());
@@ -391,8 +407,6 @@ where
             stem, ios, stem, ios, pins_where
         );
         
-        uses.push_str("use crate::gpio;\n\n");
-        println!("\n############################################\n{}", uses);
         println!("\n############################################\n{}", traits);
         println!("\n############################################\n{}", pins);
         println!("\n############################################\n{}", implementations);

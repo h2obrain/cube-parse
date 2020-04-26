@@ -66,7 +66,7 @@ impl IpGPIO {
 /// AfTree
 ///  TODO: replace tuple-types 
 pub struct AfTree {
-    mcu_gpio_map: AfTreeGpios,
+    mcu_gpio_map: AfTreeGpiosAll,
     tree: AfTreeStems,
 }
 // stems
@@ -78,6 +78,7 @@ pub type AfTreeIos = BTreeMap<(SortedString,SortedString), (String,AfTreePins)>;
 // pins, key:pin value:(pin-letter,pin-number,mcu-map)
 pub type AfTreePins = BTreeMap<SortedString, (String,String,AfTreeGpios)>;
 // gpios, key:gpio-mcu-name value:gpio-versions
+pub type AfTreeGpiosAll = BTreeMap<SortedString, (String,AfTreeGpioVersions)>;
 pub type AfTreeGpios = BTreeMap<SortedString, AfTreeGpioVersions>;
 // gpios, key:gpio-version value:mcus
 pub type AfTreeGpioVersions = BTreeMap<SortedString, Rc<AfTreeMcus>>;
@@ -87,7 +88,7 @@ pub type AfTreeMcus = BTreeSet<SortedString>;
 impl AfTree {
     pub fn new() -> Self {
         AfTree {
-            mcu_gpio_map: AfTreeGpios::new(),
+            mcu_gpio_map: AfTreeGpiosAll::new(),
             tree: AfTreeStems::new()
         }
     }
@@ -126,6 +127,7 @@ impl AfTree {
                     continue; // warn only
                 }
             }
+            eprintln!("{} => {}/{}", gpio,gpio_mcu,gpio_version);
             
             let mut mcus_simplified: AfTreeMcus = AfTreeMcus::new();
             for mcu in mcus {
@@ -142,19 +144,33 @@ impl AfTree {
             
             let mcus_simplified = Rc::new(mcus_simplified);
             
-            let duplicated = af.mcu_gpio_map
-                .entry(gpio_mcu.to_sorted_string()).or_insert_with(AfTreeGpioVersions::new)
-                .insert(gpio_version.to_sorted_string(), mcus_simplified.clone());
-            if duplicated.is_some() {
-                eprintln!("FIXME: gpio '{}/{}' is duplicated! (ignoring)", gpio_mcu, gpio_version);
-                // warn only
-            }
-            
             for p in gpio_data.gpio_pin {
                 let name = p.get_name();
                 if name.is_some() {
-                    p.update_af_tree(&gpio_mcu, &gpio_version, mcus_simplified.clone(), &mut af.tree);
+                    p.update_af_tree(&gpio_mcu, &gpio_version, &mcus_simplified, &mut af.tree);
                 }
+            }
+
+            if let Some(duplicated) = af.mcu_gpio_map
+                .entry(gpio_mcu.to_sorted_string()).or_insert_with(||(gpio.to_string(),AfTreeGpioVersions::new())).1
+                .insert(gpio_version.to_sorted_string(), mcus_simplified) //.clone()
+            {
+                if duplicated != af.mcu_gpio_map[&gpio_mcu.to_sorted_string()].1[&gpio_version.to_sorted_string()] {
+                    eprintln!("FIXME: gpio '{}=>{} ({}/{})' is duplicated! (ignoring)",
+                        gpio_mcu, gpio_version,
+                        af.mcu_gpio_map[&gpio_mcu.to_sorted_string()].0, // A
+                        gpio, // B
+                    );
+                    eprintln!("mcus A: {:?}",duplicated);
+                    eprintln!("mcus B: {:?}",af.mcu_gpio_map[&gpio_mcu.to_sorted_string()].1[&gpio_version.to_sorted_string()]);
+                    eprintln!("mcus A: {:?}",af.mcu_gpio_map[&"STM32F303".to_sorted_string()].1[&gpio_version.to_sorted_string()]);
+                    eprintln!("mcus B: {:?}",af.mcu_gpio_map[&"STM32F303E".to_sorted_string()].1[&gpio_version.to_sorted_string()]);
+                    eprintln!("{:?}", af.mcu_gpio_map.keys());
+                    for k in af.mcu_gpio_map.keys() {
+                        eprintln!("{} => {:?} ({})", k, k.0.as_bytes(), k.as_str()=="STM32F303");
+                    }
+                }
+                // warn only
             }
         }
         Ok(af)
@@ -207,8 +223,8 @@ impl GPIOPin {
         &self,
         gpio_mcu: &str,
         gpio_version: &str,
-        mcus: Rc<AfTreeMcus>,
-        af_tree: &mut AfTreeStems,
+        mcus: &Rc<AfTreeMcus>,
+        af_tree: &mut AfTreeStems
     ) {
         lazy_static! {
             static ref STEM_REGEX: Regex = Regex::new(
@@ -269,7 +285,20 @@ impl GPIOPin {
                         continue; // warn only
                     }
                 }
-                                
+                
+//                // merge duplicated            
+//                let mcus_in_tree = af_tree
+//                    .entry(stem).or_insert_with(AfTreeDevs::new)
+//                    .entry(dev).or_insert_with(AfTreeIos::new)
+//                    .entry((af,io)).or_insert_with(||(io_name,AfTreePins::new())).1
+//                    .entry(pin).or_insert_with(||(pin_letter,pin_number,AfTreeGpios::new())).2
+//                    .entry(gpio_mcu.to_sorted_string()).or_insert_with(AfTreeGpioVersions::new)
+//                    .entry(gpio_version.to_sorted_string()).or_insert_with(AfTreeMcus::new);
+//                // merge
+//                for mcu in mcus { mcus_in_tree.insert(mcu.clone()); }
+//                *mcus_in_tree = (*mcus_in_tree).union(mcus).collect();
+                
+                // do not allow duplicated (would also be enough..)
                 let duplicated = af_tree
                     .entry(stem).or_insert_with(AfTreeDevs::new)
                     .entry(dev).or_insert_with(AfTreeIos::new)
@@ -277,11 +306,11 @@ impl GPIOPin {
                     .entry(pin).or_insert_with(||(pin_letter,pin_number,AfTreeGpios::new())).2
                     .entry(gpio_mcu.to_sorted_string()).or_insert_with(AfTreeGpioVersions::new)
                     .insert(gpio_version.to_sorted_string(), mcus.clone());
-                
-                if duplicated.is_some() {
-                    eprintln!("FIXME: gpio '{}/{}' is duplicated! (ignoring)", gpio_mcu, gpio_version);
-                    // warn only
-                }
+                // error
+//                if let Some(_duplicated) = duplicated {
+//                    eprintln!("FIXME: gpio '{}=>{}' is duplicated! (ignoring)", gpio_mcu,gpio_version);
+//                    // do nothing
+//                }
             }
         }
     }
