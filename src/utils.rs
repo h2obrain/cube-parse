@@ -1,4 +1,4 @@
-use std::{error::Error, fs::File, io::BufReader, path::Path, fmt, cmp::Ordering, hash::{Hash,Hasher}};
+use std::{error::Error, fs::File, io::BufReader, path::Path, fmt, cmp::Ordering};
 use serde::Deserialize;
 use lazy_static::lazy_static;
 use regex::Regex;
@@ -51,38 +51,19 @@ impl ToPascalCase for str {
 }
 
 /// SortedString
-#[derive(Clone, /*Hash,*//* Eq,*/ /*PartialEq,*/ /*PartialOrd*//*, Debug*/)]
+#[derive(Clone, Eq, PartialEq /*, Debug*/)]
 pub struct SortedString(pub String);
 impl Ord for SortedString {
     fn cmp(&self, other: &Self) -> Ordering {
+        // natural sort (lets hope it distinguishes all the different utf8 number characters)
         compare_str(self.0.as_str(), other.0.as_str())
+        // unnatural sort
+        //self.0.as_str().cmp(other.0.as_str())
     }
 }
 impl PartialOrd for SortedString {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         Some(self.cmp(other))
-    }
-}
-impl Eq for SortedString {
-}
-impl PartialEq for SortedString {
-    fn eq(&self, other: &Self) -> bool {
-        self.0.as_str() == other.0.as_str()
-    }
-}
-impl PartialEq<&SortedString> for SortedString {
-    fn eq(&self, other: &&Self) -> bool {
-        self.0.as_str() == other.0.as_str()
-    }
-}
-//impl PartialEq<SortedString> for &SortedString {
-//    fn eq(&&self, other: &Self) -> bool {
-//        self.0.as_str() == other.0.as_str()
-//    }
-//}
-impl Hash for SortedString {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        self.0.hash(state);
     }
 }
 impl fmt::Debug for SortedString {

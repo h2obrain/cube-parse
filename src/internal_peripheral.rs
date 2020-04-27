@@ -9,12 +9,22 @@ use serde_derive::Deserialize;
 
 use crate::utils::{load_file,ToPascalCase,SortedString,ToSortedString};
 
+
+// TODO f1 compatibility with something like that
+//  if f1 {
+//    if SpecificParameter not present {
+//      manually add SpecificParameter.name=GPIO_AF
+//      SpecificParameter.PossibleValue = GPIO_AF_DISABLE
+//    } else {
+//      SpecificParameter.PossibleValue = GPIO_AF_ENABLE
+//    }
+//  }
+
 #[derive(Debug, Deserialize)]
 pub(crate) struct PossibleValue {
     #[serde(rename = "$value")]
     pub(crate) val: String,
 }
-
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "PascalCase")]
@@ -75,8 +85,8 @@ pub type AfTreeStems = BTreeMap<SortedString, AfTreeDevs>;
 pub type AfTreeDevs = BTreeMap<SortedString, AfTreeIos>;
 // device io, key:(af,io) value:(io-name,pin-map)
 pub type AfTreeIos = BTreeMap<(SortedString,SortedString), (String,AfTreePins)>;
-// pins, key:pin value:(pin-letter,pin-number,mcu-map)
-pub type AfTreePins = BTreeMap<SortedString, (String,String,AfTreeGpios)>;
+// pins, key:(port-name,pin-number) value:(original-names,mcu-map)
+pub type AfTreePins = BTreeMap<(String,u32), (BTreeSet<SortedString>,AfTreeGpios)>;
 // gpios, key:gpio-mcu-name value:gpio-versions
 pub type AfTreeGpiosAll = BTreeMap<SortedString, (String,AfTreeGpioVersions)>;
 pub type AfTreeGpios = BTreeMap<SortedString, AfTreeGpioVersions>;
@@ -93,9 +103,15 @@ impl AfTree {
         }
     }
     pub fn build(
+        family: &str,
         mcu_gpio_map: &HashMap<String, Vec<String>>,
         db_dir: &Path,
+        simplify_mcu_names: bool,
     ) -> Result<Self, String> {
+        if family=="STM32F1" {
+            return Err("The STM32F1-family is unforunately not supported! (see \"TODO f1 compatibility\" in internal_peripherals.rs)".to_string());
+        }
+        
         let mut af = AfTree::new();
     
         lazy_static! {
@@ -104,8 +120,6 @@ impl AfTree {
         }
         
         for (gpio, mcus) in mcu_gpio_map {
-            //println!("{:?}",gpio);
-            // TODO filter out mcus here if needed..
             let gpio_data;
             match IpGPIO::load(db_dir, &gpio) {
                 Ok(gd) => gpio_data = gd,
@@ -130,57 +144,48 @@ impl AfTree {
             eprintln!("{} => {}/{}", gpio,gpio_mcu,gpio_version);
             
             let mut mcus_simplified: AfTreeMcus = AfTreeMcus::new();
-            for mcu in mcus {
-                match MCUS_REGEX.captures(mcu) {
-                    Some(m) => {
-                        mcus_simplified.insert(m.name("mcu").unwrap().as_str().to_lowercase().to_sorted_string());
-                    },
-                    None => {
-                        eprintln!("FIXME: gpio-mcu '{}' could not be parsed to (STM32[LF..]xxx)YYY! (ignoring)", mcu);
-                        continue; // warn only
+            if simplify_mcu_names {
+                for mcu in mcus {
+                    match MCUS_REGEX.captures(mcu) {
+                        Some(m) => {
+                            mcus_simplified.insert(m.name("mcu").unwrap().as_str().to_lowercase().to_sorted_string());
+                        },
+                        None => {
+                            eprintln!("FIXME: gpio-mcu '{}' could not be parsed to (STM32[LF..]xxx)YYY! (ignoring)", mcu);
+                            continue; // warn only
+                        }
                     }
                 }
+            } else {
+                mcus_simplified = mcus.iter().map(|mcu|mcu.to_sorted_string()).collect();
             }
             
             let mcus_simplified = Rc::new(mcus_simplified);
             
             for p in gpio_data.gpio_pin {
-                let name = p.get_name();
-                if name.is_some() {
-                    p.update_af_tree(&gpio_mcu, &gpio_version, &mcus_simplified, &mut af.tree);
-                }
+                p.update_af_tree(&gpio_mcu, &gpio_version, &mcus_simplified, &mut af.tree);
             }
 
             if let Some(duplicated) = af.mcu_gpio_map
                 .entry(gpio_mcu.to_sorted_string()).or_insert_with(||(gpio.to_string(),AfTreeGpioVersions::new())).1
                 .insert(gpio_version.to_sorted_string(), mcus_simplified) //.clone()
             {
-                if duplicated != af.mcu_gpio_map[&gpio_mcu.to_sorted_string()].1[&gpio_version.to_sorted_string()] {
-                    eprintln!("FIXME: gpio '{}=>{} ({}/{})' is duplicated! (ignoring)",
-                        gpio_mcu, gpio_version,
-                        af.mcu_gpio_map[&gpio_mcu.to_sorted_string()].0, // A
-                        gpio, // B
-                    );
-                    eprintln!("mcus A: {:?}",duplicated);
-                    eprintln!("mcus B: {:?}",af.mcu_gpio_map[&gpio_mcu.to_sorted_string()].1[&gpio_version.to_sorted_string()]);
-                    eprintln!("mcus A: {:?}",af.mcu_gpio_map[&"STM32F303".to_sorted_string()].1[&gpio_version.to_sorted_string()]);
-                    eprintln!("mcus B: {:?}",af.mcu_gpio_map[&"STM32F303E".to_sorted_string()].1[&gpio_version.to_sorted_string()]);
-                    eprintln!("{:?}", af.mcu_gpio_map.keys());
-                    for k in af.mcu_gpio_map.keys() {
-                        eprintln!("{} => {:?} ({})", k, k.0.as_bytes(), k.as_str()=="STM32F303");
-                    }
-                }
+                let harmless = duplicated == af.mcu_gpio_map[&gpio_mcu.to_sorted_string()].1[&gpio_version.to_sorted_string()];
+                eprintln!("FIXME: gpio '{}=>{} ({}/{})' is duplicated{}! (ignoring)",
+                    gpio_mcu, gpio_version,
+                    af.mcu_gpio_map[&gpio_mcu.to_sorted_string()].0, // A
+                    gpio, // B
+                    if harmless {" in a harmless way"} else {""}
+                );
                 // warn only
             }
         }
         Ok(af)
     }
-//    pub fn iter(&self, stem_selection: &Option<Vec<&str>>) -> Result<btree_map.Iter<SortedString, AfTreeDevs>, String> {
     pub fn iter(
         &self,
         stem_selection: &Option<Vec<&str>>,
-    ) -> Result<impl Iterator<Item = (&SortedString, &AfTreeDevs)>, String>
-    {
+    ) -> Result<impl Iterator<Item = (&SortedString, &AfTreeDevs)>, String> {
         // TODO ask someone how to do this correctly :)
         let sel: Vec<SortedString>;
         if let Some(stem_selection) = stem_selection {
@@ -204,17 +209,26 @@ impl AfTree {
     }
 }
 
+
 impl GPIOPin {
+    /// Build name from self.port_name and GPIO_PIN_##
+    #[allow(dead_code)]
     pub fn get_name(&self) -> Option<String> {
-        let gpio_pin = self
+        match self.get_pin_nr() {
+            Some(num) => Some(format!("{}{}", &self.port_name, num)),
+            None => None,
+        }
+    }
+    
+    /// Build pin_nr from GPIO_PIN_## instead of
+    /// using self.name which can have strange values like
+    /// "PA10 [PA12]" for a remappable pin
+    pub fn get_pin_nr(&self) -> Option<u32> {
+        match self
             .specific_parameter
             .iter()
-            .find(|v| v.name == "GPIO_Pin");
-        match gpio_pin {
-            Some(v) => {
-                let num = v.possible_value.val.split('_').collect::<Vec<_>>()[2];
-                Some(format!("{}{}", &self.port_name, num))
-            }
+            .find(|v| v.name == "GPIO_Pin") {
+            Some(v) => v.possible_value.val.split('_').collect::<Vec<_>>()[2].parse().map_or(None,Some),
             None => None,
         }
     }
@@ -231,12 +245,21 @@ impl GPIOPin {
                 r#"^(?P<dev>(?P<stem>((FMP)?I2|USB_OTG_)?[A-Z-]+)\d*(ext)?)(_(?P<io>[\w-]+))?$"#
             ).unwrap();
             static ref AF_REGEX: Regex = Regex::new(r#"^GPIO_(?P<af>[a-zA-Z\d]+)_\w+$"#).unwrap();
-            static ref GPIO_LETTER_REGEX: Regex = Regex::new(r#"^P(?P<letter>[a-zA-Z]+)(?P<number>\d+)$"#).unwrap();
         }
 
+        // try to get pin_nr
+        let pin_nr;
+        match self.get_pin_nr() {
+            Some(nr) => pin_nr = nr,
+            None => {
+                eprintln!("FIXME: pin with name '{}' has no decimal number in its SpecificParameter(PinName).PossibleValue-field! (ignoring)", self.name);
+                return;
+            }
+        }
         
         if let Some(ref v) = self.pin_signal {
             for sig in v {
+                
                 let m;
                 match STEM_REGEX.captures(&sig.name) {
                     Some(m_) => m = m_,
@@ -257,6 +280,7 @@ impl GPIOPin {
                         continue;
                     }
                 }
+                
                                 
                 let stem = m.name("stem").unwrap().as_str().to_sorted_string();
                 let dev = m.name("dev").unwrap().as_str().to_sorted_string();
@@ -270,49 +294,25 @@ impl GPIOPin {
                         stem.clone()
                     };
                 let io_name = "Pin".to_string() + io.as_str().to_pascalcase().as_str();
-                let pin = self.get_name().unwrap().to_sorted_string();
-                
-                // This is only needed for a new pin
-                let pin_letter;
-                let pin_number;
-                match GPIO_LETTER_REGEX.captures(pin.as_str()) {
-                    Some(m) => {
-                        pin_letter = m.name("letter").unwrap().as_str().to_string();
-                        pin_number = m.name("number").unwrap().as_str().to_string();
-                    },
-                    None => {
-                        eprintln!("FIXME: pin '{}' could not be parsed to P(letter)(number)! (ignoring)", pin);
-                        continue; // warn only
-                    }
-                }
-                
-//                // merge duplicated            
-//                let mcus_in_tree = af_tree
-//                    .entry(stem).or_insert_with(AfTreeDevs::new)
-//                    .entry(dev).or_insert_with(AfTreeIos::new)
-//                    .entry((af,io)).or_insert_with(||(io_name,AfTreePins::new())).1
-//                    .entry(pin).or_insert_with(||(pin_letter,pin_number,AfTreeGpios::new())).2
-//                    .entry(gpio_mcu.to_sorted_string()).or_insert_with(AfTreeGpioVersions::new)
-//                    .entry(gpio_version.to_sorted_string()).or_insert_with(AfTreeMcus::new);
-//                // merge
-//                for mcu in mcus { mcus_in_tree.insert(mcu.clone()); }
-//                *mcus_in_tree = (*mcus_in_tree).union(mcus).collect();
                 
                 // do not allow duplicated (would also be enough..)
-                let duplicated = af_tree
-                    .entry(stem).or_insert_with(AfTreeDevs::new)
-                    .entry(dev).or_insert_with(AfTreeIos::new)
-                    .entry((af,io)).or_insert_with(||(io_name,AfTreePins::new())).1
-                    .entry(pin).or_insert_with(||(pin_letter,pin_number,AfTreeGpios::new())).2
+                let pin = af_tree
+                    .entry(stem.clone()).or_insert_with(AfTreeDevs::new)
+                    .entry(dev.clone()).or_insert_with(AfTreeIos::new)
+                    .entry((af.clone(),io.clone())).or_insert_with(||(io_name,AfTreePins::new())).1
+                    .entry((self.port_name.to_string(),pin_nr)).or_insert_with(||(BTreeSet::new(),AfTreeGpios::new()));
+                pin.0.insert(self.name.to_sorted_string());
+                let duplicated = pin.1
                     .entry(gpio_mcu.to_sorted_string()).or_insert_with(AfTreeGpioVersions::new)
                     .insert(gpio_version.to_sorted_string(), mcus.clone());
                 // error
-//                if let Some(_duplicated) = duplicated {
-//                    eprintln!("FIXME: gpio '{}=>{}' is duplicated! (ignoring)", gpio_mcu,gpio_version);
-//                    // do nothing
-//                }
+                if let Some(_duplicated) = duplicated {
+                    eprintln!("FIXME: gpio '{}=>{}=>{}=>{}=>{}=>{}' is duplicated! (pin-names:{:?}) (ignoring)",
+                    stem,dev,af,io,gpio_mcu,gpio_version,
+                    pin.0);
+                    // do nothing
+                }
             }
         }
     }
-
 }

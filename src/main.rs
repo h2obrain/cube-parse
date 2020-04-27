@@ -12,6 +12,10 @@ mod utils;
 
 use utils::ToPascalCase;
 
+use std::collections::{BTreeSet,BTreeMap};
+use utils::{SortedString,ToSortedString};
+
+
 #[derive(Debug, PartialEq)]
 enum GenerateTarget {
     QueryPinMappings,
@@ -152,11 +156,11 @@ fn main() -> Result<(), String> {
     match generate {
         GenerateTarget::Features => generate_features(&mcu_gpio_map, &mcu_package_map, &mcu_family)?,
         GenerateTarget::PinMappings => {
-            let af_tree = internal_peripheral::AfTree::build(&mcu_gpio_map, &db_dir)?;
-            generate_pin_mappings(&af_tree, &af_stems)?;
+            let af_tree = internal_peripheral::AfTree::build(mcu_family, &mcu_gpio_map, &db_dir, false)?;
+            generate_pin_mappings(&af_tree, &af_stems, true)?;
         },
         GenerateTarget::QueryPinMappings => {
-            let af_tree = internal_peripheral::AfTree::build(&mcu_gpio_map, &db_dir)?;
+            let af_tree = internal_peripheral::AfTree::build(mcu_family, &mcu_gpio_map, &db_dir, true)?;
             display_af_tree(&af_tree, &af_stems, false)?;
         },
         GenerateTarget::PrintFamilies => (), // this point is never reached! 
@@ -266,6 +270,36 @@ fn generate_features(
     Ok(())
 }
 
+
+/// Example loop for AfTree
+//fn generate_pin_mappings(
+//    af_tree: &internal_peripheral::AfTree,
+//    af_stem_selection: &Option<Vec<&str>>,
+//) -> Result<(), String> {
+//    for (stem,dev_map) in af_tree.iter(af_stem_selection)? {
+//        for (dev,io_map) in dev_map {
+//            for ((af,io),(io_name,pin_map)) in io_map {
+//                for ((port_name,pin_nr),(_original_pin_names,gpio_map)) in pin_map {
+//                    for (gpio_mcu,versions) in gpio_map {
+//                        #[allow(clippy::never_loop)]
+//                        for (version,mcus) in versions {
+//                            for mcu in (*mcus).iter() {
+//                            }
+//                            // fixme
+//                            if versions.len() > 1 {
+//                                eprintln!("Multiple gpio-versions not supported! {:?}", versions.keys());
+//                            }
+//                            break;
+//                        }
+//                    }
+//                }
+//            }
+//        }
+//    }
+//    Ok(())
+//}
+
+
 /// Display/query pin mappings from the AfTree.
 fn display_af_tree(
     af_tree: &internal_peripheral::AfTree,
@@ -278,12 +312,12 @@ fn display_af_tree(
             println!("  {}", dev);
             for ((af,io),(io_name,pin_map)) in io_map {
                 if !verbose {
-                    let pin_names = pin_map.keys().map(|k|format!("{:4}",k)).collect::<Vec<_>>();
+                    let pin_names = pin_map.keys().map(|(p,nr)|format!("{}{:<2}",p,nr)).collect::<Vec<_>>();
                     println!("    {:4}: {:10} == {:8} =[ {}", af, io_name, io, pin_names.join(" | "));
                 } else {
                     println!("    {:4}: {} ({})", af, io_name, io);
-                    for (pin,(_pin_letter,_pin_number,gpio_map)) in pin_map {
-                        println!("      {}", pin);
+                    for ((port_name,pin_nr),(_original_pin_names,gpio_map)) in pin_map {
+                        println!("      {}{}", port_name,pin_nr);
                         for (gpio_mcu,versions) in gpio_map {
                             println!("        gpio-group: {}", gpio_mcu);
                             #[allow(clippy::never_loop)]
@@ -311,19 +345,72 @@ fn display_af_tree(
 fn generate_pin_mappings(
     af_tree: &internal_peripheral::AfTree,
     af_stem_selection: &Option<Vec<&str>>,
+    combine_mcu_lists: bool,
 ) -> Result<(), String> {
-    // TODO maybe add build_tree(do-not-distinguish-af) mode for uses:String
     
-    for (stem,dev_map) in af_tree.iter(af_stem_selection)? {
-        let mut traits = String::new();
-        let mut ios:Vec<&str> = Vec::new();
-        let mut pins_where = String::new();
-        let mut implementations = String::new();
+    // collecting data without any efficiency in mind :)
+    #[allow(clippy::type_complexity)]
+    let mut mct: BTreeMap<BTreeSet<&SortedString>, BTreeSet<(SortedString,u32,SortedString,SortedString,SortedString)>> = BTreeMap::new();
+
+    if combine_mcu_lists {
+        // combine mcus per pin
+        for (_stem,dev_map) in af_tree.iter(af_stem_selection)? {
+            for (dev,io_map) in dev_map {
+                for ((af,_io),(io_name,pin_map)) in io_map {
+                    for ((port_name,pin_nr),(_original_pin_names,gpio_map)) in pin_map {
+                        let mut grouped_mcus: BTreeSet<&SortedString> = BTreeSet::new();
+                        for versions in gpio_map.values() {
+                            #[allow(clippy::never_loop)]
+                            for mcus in versions.values() {
+                                grouped_mcus.extend((*mcus).iter());
+                                if versions.len() > 1 {
+                                    eprintln!("Multiple gpio-versions not supported! {:?}", versions.keys());
+                                }
+                                break;
+                            }
+                        }
+                        mct.entry(grouped_mcus.to_owned()).or_insert_with(BTreeSet::new).insert((
+                                    // note, the order here is important (see below: (p,n, af, ion, dev))
+                                    port_name.to_sorted_string(),*pin_nr,
+                                    af.to_owned(),
+                                    io_name.to_sorted_string(),
+                                    dev.to_owned()
+                                ));
+                    }
+                }
+            }
+        }
+    } else {
+        // leave original mcus groups
+        for (_stem,dev_map) in af_tree.iter(af_stem_selection)? {
+            for (dev,io_map) in dev_map {
+                for ((af,_io),(io_name,pin_map)) in io_map {
+                    for ((port_name,pin_nr),(_original_pin_names,gpio_map)) in pin_map {
+                        for versions in gpio_map.values() {
+                            #[allow(clippy::never_loop)]
+                            for mcus in versions.values() {
+                                mct.entry(mcus.iter().collect()).or_insert_with(BTreeSet::new).insert((
+                                    // note, the order here is important (see below: (p,n, af, ion, dev))
+                                    port_name.to_sorted_string(),*pin_nr,
+                                    af.to_owned(),
+                                    io_name.to_sorted_string(),
+                                    dev.to_owned()
+                                ));
+                                if versions.len() > 1 {
+                                    eprintln!("Multiple gpio-versions not supported! {:?}", versions.keys());
+                                }
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
         
-        let stem = stem.as_str().to_pascalcase();
-        traits.push_str(format!("pub trait Pins<{}> {{}}\n", stem).as_str());
-        
-        implementations.push_str("
+    // formatting collected data
+    let mut implementations = String::new();
+    implementations.push_str("
 use crate::gpio;\n\n
 
 macro_rules! pins {{
@@ -339,81 +426,152 @@ macro_rules! pins {{
 }}
 
 ");
-
-        for (dev,io_map) in dev_map {
-            for ((af,io),(io_name,pin_map)) in io_map {
-                traits.push_str(format!("pub trait {}<{}> {{}}\n", io_name,stem).as_str());
-                ios.push(io.as_str());
-                pins_where.push_str(format!("    {}: {}<{}>,\n", io, io_name, stem).as_str());
-                for (pin,(pin_letter,_pin_number,gpio_map)) in pin_map {
-                    let mut feature_selection = "#[cfg(any(\n".to_string();
-//                    for (gpio_mcu,versions) in gpio_map {
-                    for versions in gpio_map.values() {
-                        #[allow(clippy::never_loop)]
-//                        for (version,mcus) in versions {
-                        for mcus in versions.values() {
-                            for mcu in (*mcus).iter() {
-                                feature_selection.push_str(format!("    feature = \"{}\",\n", mcu).as_str());
-                            }
-                            // fixme
-                            if versions.len() > 1 {
-                                eprintln!("Multiple gpio-versions not supported! {:?}", versions.keys());
-                            }
-                            break;
-                        }
-                    }
-                    feature_selection.push_str("))]");
-                    
-                    // uses
-//                    uses.push_str(format!("
-//{}
-//use crate::gpio::gpio{}::{};
-//",
-//                        feature_selection,
-//                        pin_letter.to_lowercase(),
-//                        pin
-//                    ).as_str());
-//
-//                    // implementations
-//                    implementations.push_str(format!("
-//{}
-//impl {}<{}> for {}<{}> {{}}
-//",
-//                        feature_selection,
-//                        io_name, dev, pin, af
-//                    ).as_str());
-//                }
-//            }
-//        }
-//    }
-
-                    // implementations
-                    implementations.push_str(format!("
+    
+    for (mcus, pins) in mct {
+        implementations.push_str(format!(
+"
+#[cfg(any(
 {}
-impl {}<{}> for gpio::gpio{}::{}<gpio::{}> {{}}
+))]
+pins! {{
+{}
+}}
 ",
-                        feature_selection,
-                        io_name, dev, pin_letter.to_lowercase(), pin, af
-                    ).as_str());
-                }
-            }
-        }
-        
-        let ios = ios.join(", ");
-        let pins = format!("
-impl<{}, {}> Pins<{}> for ({})
-where
-{}{{}}",
-            stem, ios, stem, ios, pins_where
-        );
-        
-        println!("\n############################################\n{}", traits);
-        println!("\n############################################\n{}", pins);
-        println!("\n############################################\n{}", implementations);
+            mcus.iter().map(|mcu|
+                format!("    feature = \"{}\"", mcu)
+            ).collect::<Vec<_>>().join("\n"),
+            pins.iter().map(|(p,n, af, ion, dev)|
+                format!(
+                    "    gpio::gpio{}::{}{} => {{gpio::{}: {}<{}>}},",
+                    p.as_str()[1..].to_lowercase(),
+                    p,n,
+                    af, ion, dev
+                )
+            ).collect::<Vec<_>>().join("\n"),
+        ).as_str());
     }
+    
+    // output
+    println!("######################
+## Supi Implementation ##
+
+{}
+",
+        implementations
+    );
     
     Ok(())
 }
+
+// old shit
+///// Generate the pin mappings for the AfTree.
+//fn generate_pin_mappings(
+//    af_tree: &internal_peripheral::AfTree,
+//    af_stem_selection: &Option<Vec<&str>>,
+//) -> Result<(), String> {
+//    // TODO maybe add build_tree(do-not-distinguish-af) mode for uses:String
+//    
+//    for (stem,dev_map) in af_tree.iter(af_stem_selection)? {
+//        let mut traits = String::new();
+//        let mut ios:Vec<&str> = Vec::new();
+//        let mut pins_where = String::new();
+//        let mut implementations = String::new();
+//        
+//        let stem = stem.as_str().to_pascalcase();
+//        traits.push_str(format!("pub trait Pins<{}> {{}}\n", stem).as_str());
+//        
+//        implementations.push_str("
+//use crate::gpio;\n\n
+//
+//macro_rules! pins {{
+//    ($($PIN:ident => {{
+//        $($AF:ty: $TRAIT:ty),+
+//    }}),+) => {{
+//        $(
+//            $(
+//                impl $TRAIT for $PIN<Alternate<$AF>> {{}}
+//            )+
+//        )+
+//    }}
+//}}
+//
+//");
+//
+//        for (dev,io_map) in dev_map {
+//            for ((af,io),(io_name,pin_map)) in io_map {
+//                traits.push_str(format!("pub trait {}<{}> {{}}\n", io_name,stem).as_str());
+//                ios.push(io.as_str());
+//                pins_where.push_str(format!("    {}: {}<{}>,\n", io, io_name, stem).as_str());
+//                for ((port_name,pin_nr),(_original_pin_names,gpio_map)) in pin_map {
+//                    let mut feature_selection = "#[cfg(any(\n".to_string();
+////                    for (gpio_mcu,versions) in gpio_map {
+//                    for versions in gpio_map.values() {
+//                        #[allow(clippy::never_loop)]
+////                        for (version,mcus) in versions {
+//                        for mcus in versions.values() {
+//                            for mcu in (*mcus).iter() {
+//                                feature_selection.push_str(format!("    feature = \"{}\",\n", mcu).as_str());
+//                            }
+//                            // fixme
+//                            if versions.len() > 1 {
+//                                eprintln!("Multiple gpio-versions not supported! {:?}", versions.keys());
+//                            }
+//                            break;
+//                        }
+//                    }
+//                    feature_selection.push_str("))]");
+//                    
+//                    // uses
+////                    uses.push_str(format!("
+////{}
+////use crate::gpio::gpio{}::{};
+////",
+////                        feature_selection,
+////                        pin_letter.to_lowercase(),
+////                        pin
+////                    ).as_str());
+////
+////                    // implementations
+////                    implementations.push_str(format!("
+////{}
+////impl {}<{}> for {}<{}> {{}}
+////",
+////                        feature_selection,
+////                        io_name, dev, pin, af
+////                    ).as_str());
+////                }
+////            }
+////        }
+////    }
+//
+//                    // implementations
+////                    implementations.push_str(format!("
+////{}
+////impl {}<{}> for gpio::gpio{}::{}{}<gpio::{}> {{}}
+////",
+////                        feature_selection,
+////                        io_name, dev, port_name.to_lowercase()[1..], port_name,pin_nr, af
+////                    ).as_str());
+//                }
+//            }
+//        }
+//        
+//        let ios = ios.join(", ");
+//        let pins = format!("
+//impl<{}, {}> Pins<{}> for ({})
+//where
+//{}{{}}",
+//            stem, ios, stem, ios, pins_where
+//        );
+//        
+//        println!("\n############################################\n{}", traits);
+//        println!("\n############################################\n{}", pins);
+//        println!("\n############################################\n{}", implementations);
+//    }
+//    
+//    Ok(())
+//}
+
 
 #[cfg(test)]
 mod tests {
