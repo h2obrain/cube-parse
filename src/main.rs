@@ -350,6 +350,22 @@ fn generate_pin_mappings(
     // collecting data without any efficiency in mind :)
     // probably group for each stem or so..
     
+    // Used af and pins (FIXME: this has to be done on a mcu basis..)
+    let mut gpio_afs: BTreeSet<SortedString> = BTreeSet::new();
+    let mut gpios:    BTreeMap<SortedString, BTreeSet<(String,u32)>> = BTreeMap::new();
+    for (_stem,dev_map) in af_tree.iter(af_stem_selection)? {
+        for io_map in dev_map.values() {
+            for ((af,_io),(_io_name,pin_map)) in io_map {
+                gpio_afs.insert(af.to_owned());
+                for (port_name,pin_nr) in pin_map.keys() {
+                    gpios.entry(format!("gpio{}", port_name.as_str()[1..].to_lowercase()).to_sorted_string())
+                        .or_insert_with(BTreeSet::new)
+                        .insert((port_name.to_owned(), *pin_nr));
+                }
+            }
+        }
+    }
+    
     // Pin traits and pins
     let mut tt: BTreeMap<SortedString, BTreeSet<(SortedString,&str)>> = BTreeMap::new();
     for (stem,dev_map) in af_tree.iter(af_stem_selection)? {
@@ -423,6 +439,24 @@ fn generate_pin_mappings(
         
     
     // formatting collected data
+    
+    // uses
+    let mut uses = String::new();
+    uses.push_str(format!("
+use crate::gpio::{{{}}};
+{}
+",      gpio_afs.iter().map(|s|s.to_string()).collect::<Vec<_>>().join(","),
+        gpios.iter().map(|(gpio,pins)|
+            format!(
+                "use crate::gpio::{}::{{{}}};",
+                gpio,
+                pins.iter().map(|(p,n)|
+                    format!("{}{}",p,n)
+                ).collect::<Vec<_>>().join(",")
+            )
+        ).collect::<Vec<_>>().join("\n")
+    ).as_str());
+
     // traits
     let mut traits = String::new();
     traits.push_str(format!("
@@ -493,8 +527,9 @@ pins! {{
             ).collect::<Vec<_>>().join("\n"),
             pins.iter().map(|(p,n, af, ion, dev)|
                 format!(
-                    "    gpio::gpio{}::{}{} => {{gpio::{}: {}<{}>}},",
-                    p.as_str()[1..].to_lowercase(),
+//                    "    gpio::gpio{}::{}{:<2} => {{gpio::{:4}: {}<{}>}},",
+//                    p.as_str()[1..].to_lowercase(),
+                    "    {}{:<2} => {{{:4}: {}<{}>}},",
                     p,n,
                     af, ion, dev
                 )
@@ -504,8 +539,14 @@ pins! {{
     
     
     // output
+//    println!("
+//use crate::gpio;
     println!("
-use crate::gpio;
+
+#########################
+## is this uses?       ##
+
+{}
 
 #########################
 ## 1a traits           ##
@@ -523,7 +564,7 @@ use crate::gpio;
 ## supi implementation ##
 
 {}
-",
+",      uses,
         traits,
         pins,
         implementations,
