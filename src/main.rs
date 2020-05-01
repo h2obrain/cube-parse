@@ -157,7 +157,7 @@ fn main() -> Result<(), String> {
         GenerateTarget::Features => generate_features(&mcu_gpio_map, &mcu_package_map, &mcu_family)?,
         GenerateTarget::PinMappings => {
             let af_tree = internal_peripheral::AfTree::build(mcu_family, &mcu_gpio_map, &db_dir, true)?;
-            generate_pin_mappings(&af_tree, &af_stems, false)?;
+            generate_pin_mappings(&af_tree, &af_stems, true)?;
         },
         GenerateTarget::QueryPinMappings => {
             let af_tree = internal_peripheral::AfTree::build(mcu_family, &mcu_gpio_map, &db_dir, true)?;
@@ -347,47 +347,53 @@ fn generate_pin_mappings(
     af_stem_selection: &Option<Vec<&str>>,
     combine_mcu_lists: bool,
 ) -> Result<(), String> {
+    // running 2nd pass on af-analysis (1st pass being building the af-tree)
     // collecting data without any efficiency in mind :)
     // probably group for each stem or so..
-    
-    // Used devices, af and pins (FIXME: this has to be done on a mcu basis..)
-    let mut devs: BTreeSet<SortedString> = BTreeSet::new();
-    let mut gpio_afs: BTreeSet<SortedString> = BTreeSet::new();
-    let mut gpios:    BTreeMap<SortedString, BTreeSet<(String,u32)>> = BTreeMap::new();
-    for (_stem,dev_map) in af_tree.iter(af_stem_selection)? {
-        for (dev,io_map) in dev_map {
-            devs.insert(dev.to_owned());
-            for ((af,_io),(_io_name,pin_map)) in io_map {
-                gpio_afs.insert(af.to_owned());
-                for (port_name,pin_nr) in pin_map.keys() {
-                    gpios.entry(format!("gpio{}", port_name.as_str()[1..].to_lowercase()).to_sorted_string())
-                        .or_insert_with(BTreeSet::new)
-                        .insert((port_name.to_owned(), *pin_nr));
-                }
-            }
-        }
-    }
-    
-    // Pin traits and pins
-    let mut tt: BTreeMap<SortedString, BTreeSet<(SortedString,&str)>> = BTreeMap::new();
-    for (stem,dev_map) in af_tree.iter(af_stem_selection)? {
-        for io_map in dev_map.values() {
-            for ((_af,io), (io_name,_pin_map)) in io_map {
-                tt.entry(stem.as_str().to_pascalcase().to_sorted_string()).or_insert_with(BTreeSet::new)
-                    .insert((io_name.to_sorted_string(),io.as_str()));
-            }
-        }
-    }
-    
+    // maybe don't extend gpio-version to mcu-list in af-tree
+
+    // IO traits
+//    let mut io_traits: BTreeMap<SortedString, BTreeSet<(SortedString,&str)>> = BTreeMap::new();
+//    for (stem,dev_map) in af_tree.iter(af_stem_selection)? {
+//        for io_map in dev_map.values() {
+//            for ((_af,io), (io_name,_pin_map)) in io_map {
+//                io_traits.entry(stem.as_str().to_pascalcase().to_sorted_string()).or_insert_with(BTreeSet::new)
+//                    .insert((io_name.to_sorted_string(),io.as_str()));
+//            }
+//        }
+//    }
+
+    // Devices used per mcu
+    let mut devs: BTreeMap<BTreeSet<&SortedString>, BTreeSet<SortedString>> = BTreeMap::new();
+    // AF used per mcu
+    let mut gpio_afs: BTreeMap<BTreeSet<&SortedString>, BTreeSet<SortedString>> = BTreeMap::new();
+    // Gpio pins used per mcu
+    #[allow(clippy::type_complexity)]
+    let mut gpios: BTreeMap<BTreeSet<&SortedString>, BTreeMap<SortedString, BTreeSet<(String,u32)>>> = BTreeMap::new();
+
+    // IO traits per mcu
+    #[allow(clippy::type_complexity)]
+    let mut io_traits: BTreeMap<BTreeSet<&SortedString>, BTreeMap<SortedString, BTreeSet<(SortedString,&str)>>> = BTreeMap::new();
+
     // Pin trait implementations per mcu
     #[allow(clippy::type_complexity)]
     let mut mct: BTreeMap<BTreeSet<&SortedString>, BTreeSet<(SortedString,u32,SortedString,SortedString,SortedString)>> = BTreeMap::new();
 
     if combine_mcu_lists {
-        // combine mcus per pin
-        for (_stem,dev_map) in af_tree.iter(af_stem_selection)? {
+        // combine mcus per pin-def
+        #[allow(clippy::type_complexity)]
+        let mut devs_collect: BTreeMap<SortedString, BTreeSet<&SortedString>> = BTreeMap::new();
+        #[allow(clippy::type_complexity)]
+        let mut gpio_afs_collect: BTreeMap<SortedString, BTreeSet<&SortedString>> = BTreeMap::new();
+        #[allow(clippy::type_complexity)]
+        let mut gpios_collect: BTreeMap<(String,u32), BTreeSet<&SortedString>> = BTreeMap::new();
+        #[allow(clippy::type_complexity)]
+        let mut io_traits_collect: BTreeMap<(SortedString,SortedString,&str), BTreeSet<&SortedString>> = BTreeMap::new();
+        for (stem,dev_map) in af_tree.iter(af_stem_selection)? {
             for (dev,io_map) in dev_map {
-                for ((af,_io),(io_name,pin_map)) in io_map {
+                let mut grouped_mcus_dev: BTreeSet<&SortedString> = BTreeSet::new();
+                for ((af,io),(io_name,pin_map)) in io_map {
+                    let mut grouped_mcus_af: BTreeSet<&SortedString> = BTreeSet::new();
                     for ((port_name,pin_nr),(_original_pin_names,gpio_map)) in pin_map {
                         let mut grouped_mcus: BTreeSet<&SortedString> = BTreeSet::new();
                         for versions in gpio_map.values() {
@@ -401,21 +407,47 @@ fn generate_pin_mappings(
                             }
                         }
                         mct.entry(grouped_mcus.to_owned()).or_insert_with(BTreeSet::new).insert((
-                                    // note, the order here is important (see below: (p,n, af, ion, dev))
-                                    port_name.to_sorted_string(),*pin_nr,
-                                    af.to_owned(),
-                                    io_name.to_sorted_string(),
-                                    dev.to_owned()
-                                ));
+                                // note, the order here is important (see below: (p,n, af, ion, dev))
+                                port_name.to_sorted_string(),*pin_nr,
+                                af.to_owned(),
+                                io_name.to_sorted_string(),
+                                dev.to_owned()
+                            ));
+                        gpios_collect.entry((port_name.to_owned(), *pin_nr)).or_insert_with(BTreeSet::new)
+                            .extend(grouped_mcus.iter());
+                        grouped_mcus_af.extend(grouped_mcus.iter());
                     }
+                    io_traits_collect.entry((stem.to_owned(),io_name.to_sorted_string(),io.as_str())).or_insert_with(BTreeSet::new)
+                        .extend(grouped_mcus_af.iter());
+//                io_traits.entry(stem.as_str().to_pascalcase().to_sorted_string()).or_insert_with(BTreeSet::new)
+//                    .insert((io_name.to_sorted_string(),io.as_str()));
+                    gpio_afs_collect.entry(af.to_owned()).or_insert_with(BTreeSet::new).extend(grouped_mcus_af.iter());
+                    grouped_mcus_dev.extend(grouped_mcus_af.iter());
                 }
+                devs_collect.entry(dev.to_owned()).or_insert_with(BTreeSet::new).extend(grouped_mcus_dev.iter());
             }
         }
+        for ((stem,io_name,io), mcus) in io_traits_collect {
+            io_traits.entry(mcus.to_owned()).or_insert_with(BTreeMap::new)
+                .entry(stem.as_str().to_pascalcase().to_sorted_string()).or_insert_with(BTreeSet::new)
+                .insert((io_name,io));
+        }
+        for (dev, mcus) in devs_collect {
+            devs.entry(mcus.to_owned()).or_insert_with(BTreeSet::new).insert(dev);
+        }
+        for (gpio_af, mcus) in gpio_afs_collect {
+            gpio_afs.entry(mcus.to_owned()).or_insert_with(BTreeSet::new).insert(gpio_af);
+        }
+        for (gpio, mcus) in gpios_collect {
+            gpios.entry(mcus.to_owned()).or_insert_with(BTreeMap::new)
+                .entry(format!("gpio{}", gpio.0.as_str()[1..].to_lowercase()).to_sorted_string()).or_insert_with(BTreeSet::new)
+                .insert(gpio);
+        }
     } else {
-        // leave original mcus groups
-        for (_stem,dev_map) in af_tree.iter(af_stem_selection)? {
+        // leave the original mcu groups
+        for (stem,dev_map) in af_tree.iter(af_stem_selection)? {
             for (dev,io_map) in dev_map {
-                for ((af,_io),(io_name,pin_map)) in io_map {
+                for ((af,io),(io_name,pin_map)) in io_map {
                     for ((port_name,pin_nr),(_original_pin_names,gpio_map)) in pin_map {
                         for versions in gpio_map.values() {
                             #[allow(clippy::never_loop)]
@@ -427,6 +459,16 @@ fn generate_pin_mappings(
                                     io_name.to_sorted_string(),
                                     dev.to_owned()
                                 ));
+                                io_traits.entry(mcus.iter().collect()).or_insert_with(BTreeMap::new)
+                                    .entry(stem.as_str().to_pascalcase().to_sorted_string()).or_insert_with(BTreeSet::new)
+                                    .insert((io_name.to_sorted_string(),io.as_str()));
+                                gpios.entry(mcus.iter().collect()).or_insert_with(BTreeMap::new)
+                                    .entry(format!("gpio{}", port_name.as_str()[1..].to_lowercase()).to_sorted_string())
+                                    .or_insert_with(BTreeSet::new)
+                                    .insert((port_name.to_owned(), *pin_nr));
+                                gpio_afs.entry(mcus.iter().collect()).or_insert_with(BTreeSet::new).insert(af.to_owned());
+                                devs.entry(mcus.iter().collect()).or_insert_with(BTreeSet::new).insert(dev.to_owned());
+
                                 if versions.len() > 1 {
                                     eprintln!("Multiple gpio-versions not supported! {:?}", versions.keys());
                                 }
@@ -438,70 +480,164 @@ fn generate_pin_mappings(
             }
         }
     }
+    
+    // IO traits per mcu (not really needed..)
+    #[allow(clippy::type_complexity)]
+    let mut io_traits_grouped: BTreeMap<BTreeSet<&SortedString>, BTreeMap<&SortedString, BTreeSet<(&SortedString,&str)>>> = BTreeMap::new();
+    {
+        #[allow(clippy::type_complexity)]
+        let mut iot_ex: BTreeMap<&SortedString, BTreeMap<&SortedString, BTreeSet<(&SortedString,&str)>>> = BTreeMap::new();
+        for (mcus, iot) in &io_traits {
+            for mcu in mcus {
+                for (gpio, ios) in iot {
+                    for (io_name, io) in ios {
+                        iot_ex.entry(mcu).or_insert_with(BTreeMap::new)
+                            .entry(gpio).or_insert_with(BTreeSet::new)
+                            .insert((io_name,io));
+                    }
+                }
+            }
+        }
+        while !iot_ex.is_empty() {
+            let mut ii = iot_ex.iter();
+            let mi = ii.next().unwrap();
+            let mut mcus: BTreeSet<&SortedString>;
+            mcus = ii.filter_map(|(mcu, iot)| if mi.1==iot { Some(*mcu) } else { None }).collect();
+            mcus.insert(mi.0);
+            let ios = mi.1.to_owned();
+            if io_traits_grouped.contains_key(&mcus) {
+                eprintln!("HOW?? Duplicated mcu group? ({:?})", mcus);
+            }
+            for mcu in &mcus {
+                iot_ex.remove(mcu);
+            }
+            io_traits_grouped.insert(mcus, ios);
+        }        
+    }
         
     
     // formatting collected data
     
     // uses
     let mut uses = String::new();
-    uses.push_str(format!("
-{}
+    uses.push_str("
 use crate::gpio::Alternate;
-use crate::gpio::{{{}}};
-{}
-",      devs.iter().map(|dev|format!("use crate::stm32::{};",dev)).collect::<Vec<_>>().join("\n"),
-        gpio_afs.iter().map(|af|af.to_string()).collect::<Vec<_>>().join(","),
-        gpios.iter().map(|(gpio,pins)|
-            format!(
-                "use crate::gpio::{}::{{{}}};",
-                gpio,
-                pins.iter().map(|(p,n)|
-                    format!("{}{}",p,n)
-                ).collect::<Vec<_>>().join(",")
-            )
-        ).collect::<Vec<_>>().join("\n")
-    ).as_str());
 
-    // traits
+macro_rules! dev_uses {
+    ($($DEV:ident),+) => {
+        $(
+            use crate::stm32::$DEV;
+        )+
+    }
+}
+macro_rules! gpio_af_uses {
+    ($($AF:ident),+) => {
+        use crate::gpio::{$($AF)+};
+    }
+}
+macro_rules! gpio_uses {
+    ($($GPIO:ident => {
+        $($PINS:ident),+
+    }),+) => {
+        $(
+            use crate::gpio::$GPIO::{$($PINS),+};
+        )+
+    }
+}
+");
+    
+    // devices uses
+    for (mcus, devs) in devs {
+        uses.push_str(format!(
+"
+#[cfg(any(
+{}
+))]
+dev_uses! {{
+    {}
+}}
+",          mcus.iter().map(|mcu|
+                format!("    feature = \"{}\"", mcu)
+            ).collect::<Vec<_>>().join(",\n"),
+            devs.iter().map(|dev|dev.to_string()).collect::<Vec<_>>().join(", ")
+        ).as_str());
+    }
+    // alternate function (AFx) uses
+    for (mcus, gpio_afs) in gpio_afs {
+        uses.push_str(format!(
+"
+#[cfg(any(
+{}
+))]
+gpio_af_uses! {{
+    {}
+}}
+",          mcus.iter().map(|mcu|
+                format!("    feature = \"{}\"", mcu)
+            ).collect::<Vec<_>>().join(",\n"),
+            gpio_afs.iter().map(|af|af.to_string()).collect::<Vec<_>>().join(", ")
+        ).as_str());
+    }
+        
+    for (mcus, gpios) in gpios {
+        uses.push_str(format!(
+"
+#[cfg(any(
+{}
+))]
+gpio_uses! {{
+{}
+}}
+",          mcus.iter().map(|mcu|
+                format!("    feature = \"{}\"", mcu)
+            ).collect::<Vec<_>>().join(",\n"),
+            gpios.iter().map(|(gpio,pins)|
+                format!(
+                    "    {} => {{{}}}",
+                    gpio,
+                    pins.iter().map(|(p,n)|
+                        format!("{}{}",p,n)
+                    ).collect::<Vec<_>>().join(",")
+                )
+            ).collect::<Vec<_>>().join(",\n")
+        ).as_str());
+    }
+    
+    // Define traits
     let mut traits = String::new();
-    traits.push_str(format!("
+    traits.push_str("
+macro_rules! io_traits {
+    ($($STEM:ident => {
+        $($IO:ident),+
+    }),+) => {
+        $(
+            $(
+                pub trait $IO<$STEM> {}
+            )+
+        )+
+    }
+}");
+    for (mcus, io_traits) in &io_traits {
+        traits.push_str(format!(
+"
+#[cfg(any(
 {}
-",
-        tt.iter().map(|(stem,ions)|
-            format!("/// {}
-pub trait Pins<{}> {{}}
+))]
+io_traits! {{
 {}
-",
-                stem, stem,
-                ions.iter().map(|(ion,_io)|format!(
-                    "pub trait {}<{}> {{}}",
-                    ion,stem
-                )).collect::<Vec<_>>().join("\n")
-            )).collect::<Vec<_>>().join("\n")
-    ).as_str());
-    
-    // pins
-    let mut pins = String::new();
-    pins.push_str(format!("
-{}
-",      tt.iter().map(|(stem,ions)| {
-            let all_io = ions.iter().map(|(_ion,io)|(*io).to_string()).collect::<Vec<_>>().join(",");
-            format!("/// {}
-impl<{}, {}> Pins<{}> for ({})
-where
-{}
-{{}}
-",              stem,
-                stem, all_io, stem, all_io,
-                ions.iter().map(|(ion,io)|format!(
-                    "    {}: {}<{}>",
-                    io,ion,stem
+}}
+",          mcus.iter().map(|mcu|
+                format!("    feature = \"{}\"", mcu)
+            ).collect::<Vec<_>>().join(",\n"),
+            io_traits.iter().map(|(stem,ions)|
+                format!("   {} => {{{}}}",
+                    stem,
+                    ions.iter().map(|(ion,_io)|ion.to_string()).collect::<Vec<_>>().join(",")
                 )).collect::<Vec<_>>().join(",\n")
-            )}).collect::<Vec<_>>().join("\n")
-    ).as_str());
+            ).as_str());
+    }
     
-    
-    // implementations
+    // Implement traits for the pins
     let mut implementations = String::new();
     implementations.push_str("
 macro_rules! pins {
@@ -517,7 +653,6 @@ macro_rules! pins {
 }
 
 ");
-    
     for (mcus, pins) in mct {
         implementations.push_str(format!(
 "
@@ -532,8 +667,6 @@ pins! {{
             ).collect::<Vec<_>>().join(",\n"),
             pins.iter().map(|(p,n, af, ion, dev)|
                 format!(
-//                    "    gpio::gpio{}::{}{:<2} => {{gpio::{:4}: {}<{}>}},",
-//                    p.as_str()[1..].to_lowercase(),
                     "    {}{:<2} => {{{:4}: {}<{}>}}",
                     p,n,
                     af, ion, dev
@@ -542,37 +675,60 @@ pins! {{
         ).as_str());
     }
     
+    // Define Pins<stem>
+    // NOTE: this should always be hand-edited!
+    let mut pins = String::new();
+    for (mcus, io_traits) in io_traits_grouped {
+        pins.push_str(format!(
+"
+#[cfg(any(
+{}
+))] mod pins {{
+    use crate::pin_defs::*;
+{}
+}}
+",          mcus.iter().map(|mcu|
+                format!("    feature = \"{}\"", mcu)
+            ).collect::<Vec<_>>().join(",\n"),
+            io_traits.iter().map(|(stem,ions)| {
+                let all_io = ions.iter().map(|(_ion,io)|(*io).to_string()).collect::<Vec<_>>().join(",");
+                format!("    /// {}
+    pub trait Pins<{}> {{}}
+    impl<{}, {}> Pins<{}> for ({})
+    where
+{}
+    {{}}
+",                  stem,
+                    stem,
+                    stem, all_io, stem, all_io,
+                    ions.iter().map(|(ion,io)|format!(
+                        "        {}: {}<{}>",
+                        io,ion,stem
+                    )).collect::<Vec<_>>().join(",\n")
+                )
+            }).collect::<Vec<_>>().join("\n")
+        ).as_str());
+    }
     
-    // output
-//    println!("
-//use crate::gpio;
+    // Write results to stdout
     println!("
-
-#########################
-## is this uses?       ##
-
-{}
-
-#########################
-## 1a traits           ##
-
+// Uses
 {}
 
 
-#########################
-## superuseful pins    ##
-
+// Traits
 {}
 
 
-#########################
-## supi implementation ##
+// Implementations
+{}
 
+// Pins (remove/edit by hand!)
 {}
 ",      uses,
         traits,
-        pins,
         implementations,
+        pins
     );
     
     Ok(())

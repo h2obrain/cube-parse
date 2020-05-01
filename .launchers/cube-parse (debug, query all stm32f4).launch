@@ -18,7 +18,7 @@
 <stringAttribute key="org.eclipse.cdt.launch.DEBUGGER_START_MODE" value="run"/>
 <booleanAttribute key="org.eclipse.cdt.launch.DEBUGGER_STOP_AT_MAIN" value="false"/>
 <stringAttribute key="org.eclipse.cdt.launch.DEBUGGER_STOP_AT_MAIN_SYMBOL" value="cube-parse::main"/>
-<stringAttribute key="org.eclipse.cdt.launch.PROGRAM_ARGUMENTS" value="query STM32F4 -d ${env_var:HOME}/STM32CubeMX/db/mcu"/>
+<stringAttribute key="org.eclipse.cdt.launch.PROGRAM_ARGUMENTS" value="pin_mappings STM32F4 -fFMC  -d ${env_var:HOME}/STM32CubeMX/db/mcu"/>
 <stringAttribute key="org.eclipse.cdt.launch.PROGRAM_NAME" value="/home/h2obrain/git/Olis_Gebaschtel/MCU/rust-embedded/cube-parse/target/debug/cube-parse"/>
 <stringAttribute key="org.eclipse.cdt.launch.PROJECT_ATTR" value="cube-parse"/>
 <stringAttribute key="org.eclipse.cdt.launch.WORKING_DIRECTORY" value="/home/h2obrain/git/Olis_Gebaschtel/MCU/rust-embedded/cube-parse"/>
