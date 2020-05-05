@@ -306,11 +306,11 @@ fn display_af_tree(
     af_stem_selection: &Option<Vec<&str>>,
     verbose: bool,
 ) -> Result<(), String> {
-    for (stem,dev_map) in af_tree.iter(af_stem_selection)? {
+    for (stem, dev_map) in af_tree.iter(af_stem_selection)? {
         println!("{}", stem);
         for (dev,io_map) in dev_map {
             println!("  {}", dev);
-            for ((af,io),(io_name,pin_map)) in io_map {
+            for ((af, io), (io_name, pin_map)) in io_map {
                 if !verbose {
                     let pin_names = pin_map.keys().map(|(p,nr)|format!("{}{:<2}",p,nr)).collect::<Vec<_>>();
                     println!("    {:4}: {:10} == {:8} =[ {}", af, io_name, io, pin_names.join(" | "));
