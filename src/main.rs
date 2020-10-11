@@ -13,7 +13,7 @@ mod utils;
 use utils::ToPascalCase;
 
 use std::collections::{BTreeSet,BTreeMap};
-use utils::{SortedString,ToSortedString};
+use utils::{SortedString,ToSortedString,BreakLine};
 
 
 #[derive(Debug, PartialEq)]
@@ -373,7 +373,9 @@ fn generate_pin_mappings(
 
     // IO traits per mcu
     #[allow(clippy::type_complexity)]
-    let mut io_traits: BTreeMap<BTreeSet<&SortedString>, BTreeMap<SortedString, BTreeSet<(SortedString,&str)>>> = BTreeMap::new();
+    let mut io_traits: BTreeMap<BTreeSet<&SortedString>, BTreeSet<(SortedString, &str)>> = BTreeMap::new();
+    #[allow(clippy::type_complexity)]
+    let mut io_traits_by_peripheral: BTreeMap<BTreeSet<&SortedString>, BTreeMap<SortedString, BTreeSet<(SortedString,&str)>>> = BTreeMap::new();
 
     // Pin trait implementations per mcu
     #[allow(clippy::type_complexity)]
@@ -388,7 +390,9 @@ fn generate_pin_mappings(
         #[allow(clippy::type_complexity)]
         let mut gpios_collect: BTreeMap<(String,u32), BTreeSet<&SortedString>> = BTreeMap::new();
         #[allow(clippy::type_complexity)]
-        let mut io_traits_collect: BTreeMap<(SortedString,SortedString,&str), BTreeSet<&SortedString>> = BTreeMap::new();
+        let mut io_traits_collect: BTreeMap<(SortedString,&str), BTreeSet<&SortedString>> = BTreeMap::new();
+        #[allow(clippy::type_complexity)]
+        let mut io_traits_collect_by_peripheral: BTreeMap<(SortedString,SortedString,&str), BTreeSet<&SortedString>> = BTreeMap::new();
         for (stem,dev_map) in af_tree.iter(af_stem_selection)? {
             for (dev,io_map) in dev_map {
                 let mut grouped_mcus_dev: BTreeSet<&SortedString> = BTreeSet::new();
@@ -417,18 +421,27 @@ fn generate_pin_mappings(
                             .extend(grouped_mcus.iter());
                         grouped_mcus_af.extend(grouped_mcus.iter());
                     }
-                    io_traits_collect.entry((stem.to_owned(),io_name.to_sorted_string(),io.as_str())).or_insert_with(BTreeSet::new)
+                    // Collect the io_traits by independent of the peripheral (stem)
+                    io_traits_collect
+                        .entry((io_name.to_sorted_string(),io.as_str())).or_insert_with(BTreeSet::new)
                         .extend(grouped_mcus_af.iter());
-//                io_traits.entry(stem.as_str().to_pascalcase().to_sorted_string()).or_insert_with(BTreeSet::new)
-//                    .insert((io_name.to_sorted_string(),io.as_str()));
+                    io_traits_collect_by_peripheral
+                        .entry((stem.to_owned(),io_name.to_sorted_string(),io.as_str())).or_insert_with(BTreeSet::new)
+                        .extend(grouped_mcus_af.iter());
                     gpio_afs_collect.entry(af.to_owned()).or_insert_with(BTreeSet::new).extend(grouped_mcus_af.iter());
                     grouped_mcus_dev.extend(grouped_mcus_af.iter());
                 }
                 devs_collect.entry(dev.to_owned()).or_insert_with(BTreeSet::new).extend(grouped_mcus_dev.iter());
             }
         }
-        for ((stem,io_name,io), mcus) in io_traits_collect {
-            io_traits.entry(mcus.to_owned()).or_insert_with(BTreeMap::new)
+        for ((io_name,io), mcus) in io_traits_collect {
+            io_traits
+                .entry(mcus.to_owned()).or_insert_with(BTreeSet::new)
+                .insert((io_name,io));
+        }
+        for ((stem,io_name,io), mcus) in io_traits_collect_by_peripheral {
+            io_traits_by_peripheral
+                .entry(mcus.to_owned()).or_insert_with(BTreeMap::new)
                 .entry(stem.as_str().to_pascalcase().to_sorted_string()).or_insert_with(BTreeSet::new)
                 .insert((io_name,io));
         }
@@ -459,7 +472,9 @@ fn generate_pin_mappings(
                                     io_name.to_sorted_string(),
                                     dev.to_owned()
                                 ));
-                                io_traits.entry(mcus.iter().collect()).or_insert_with(BTreeMap::new)
+                                io_traits.entry(mcus.iter().collect()).or_insert_with(BTreeSet::new)
+                                    .insert((io_name.to_sorted_string(),io.as_str()));
+                                io_traits_by_peripheral.entry(mcus.iter().collect()).or_insert_with(BTreeMap::new)
                                     .entry(stem.as_str().to_pascalcase().to_sorted_string()).or_insert_with(BTreeSet::new)
                                     .insert((io_name.to_sorted_string(),io.as_str()));
                                 gpios.entry(mcus.iter().collect()).or_insert_with(BTreeMap::new)
@@ -487,11 +502,12 @@ fn generate_pin_mappings(
     {
         #[allow(clippy::type_complexity)]
         let mut iot_ex: BTreeMap<&SortedString, BTreeMap<&SortedString, BTreeSet<(&SortedString,&str)>>> = BTreeMap::new();
-        for (mcus, iot) in &io_traits {
+        for (mcus, iot) in &io_traits_by_peripheral {
             for mcu in mcus {
                 for (gpio, ios) in iot {
                     for (io_name, io) in ios {
-                        iot_ex.entry(mcu).or_insert_with(BTreeMap::new)
+                        iot_ex
+                            .entry(mcu).or_insert_with(BTreeMap::new)
                             .entry(gpio).or_insert_with(BTreeSet::new)
                             .insert((io_name,io));
                     }
@@ -532,7 +548,7 @@ macro_rules! dev_uses {
 }
 macro_rules! gpio_af_uses {
     ($($AF:ident),+) => {
-        use crate::gpio::{$($AF)+};
+        use crate::gpio::{$($AF),+};
     }
 }
 macro_rules! gpio_uses {
@@ -595,9 +611,9 @@ gpio_uses! {{
                 format!(
                     "    {} => {{{}}}",
                     gpio,
-                    pins.iter().map(|(p,n)|
-                        format!("{}{}",p,n)
-                    ).collect::<Vec<_>>().join(",")
+                    pins.iter().map(|(p,n)| format!("{}{}",p,n))
+                        .collect::<Vec<_>>().join(", ")
+                        .break_line(10,50,"\n        ","\n        ","\n    ")
                 )
             ).collect::<Vec<_>>().join(",\n")
         ).as_str());
@@ -624,16 +640,23 @@ macro_rules! io_traits {
 {}
 ))]
 io_traits! {{
-{}
+    Dev => {{{}}}
 }}
 ",          mcus.iter().map(|mcu|
                 format!("    feature = \"{}\"", mcu)
             ).collect::<Vec<_>>().join(",\n"),
-            io_traits.iter().map(|(stem,ions)|
-                format!("   {} => {{{}}}",
-                    stem,
-                    ions.iter().map(|(ion,_io)|ion.to_string()).collect::<Vec<_>>().join(",")
-                )).collect::<Vec<_>>().join(",\n")
+            io_traits
+                .iter().map(|(ion,_io)|ion.to_string())
+                .collect::<Vec<_>>().join(", ")
+                .break_line(10,50,"\n        ","\n        ","\n    ")
+//            io_traits.iter().map(|(stem,ions)|
+//                format!("   {} => {{{}}}",
+//                    stem,
+//                format!("   Dev => {{{}}}",
+//                    ions.iter().map(|(ion,_io)|ion.to_string())
+//                        .collect::<Vec<_>>().join(", ")
+//                        .break_line(10,50,"\n        ","\n        ","\n    ")
+//                )).collect::<Vec<_>>().join(",\n")
             ).as_str());
     }
     
@@ -691,7 +714,9 @@ pins! {{
                 format!("    feature = \"{}\"", mcu)
             ).collect::<Vec<_>>().join(",\n"),
             io_traits.iter().map(|(stem,ions)| {
-                let all_io = ions.iter().map(|(_ion,io)|(*io).to_string()).collect::<Vec<_>>().join(",");
+                let all_io = ions.iter().map(|(_ion,io)|(*io).to_string())
+                                 .collect::<Vec<_>>().join(", ")
+                                 .break_line(10,50,"\n        ","\n        ","\n    ");
                 format!("    /// {}
     pub trait Pins<{}> {{}}
     impl<{}, {}> Pins<{}> for ({})
@@ -723,7 +748,22 @@ pins! {{
 // Implementations
 {}
 
-// Pins (remove/edit by hand!)
+
+//////////////////////////////////////////////////////////////////////////////
+//////////////////////////////////////////////////////////////////////////////
+//////////////////////////////////////////////////////////////////////////////
+//////////////////////////////////////////////////////////////////////////////
+//////////////////////////////////////////////////////////////////////////////
+/////////////////////                               //////////////////////////
+////////////////////// Pins (remove/edit by hand!) ///////////////////////////
+////////////////////// Those definitions belong in ///////////////////////////
+////////////////////// the device implementation   ///////////////////////////
+////////////////////// files and not into the      ///////////////////////////
+////////////////////// pin_defs.h                  ///////////////////////////
+/////////////////////                               //////////////////////////
+//////////////////////////////////////////////////////////////////////////////
+//////////////////////////////////////////////////////////////////////////////
+//////////////////////////////////////////////////////////////////////////////
 {}
 ",      uses,
         traits,

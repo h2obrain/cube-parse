@@ -99,3 +99,23 @@ impl ToSortedString for String {
         SortedString(self.to_string())
     }
 }
+
+pub trait BreakLine {
+    /// Insert delimiter in a string if it is longer than max_width at a space (' ') between min_width and max_width
+    /// prefix/suffix are also added in this case
+    fn break_line(self, min_width: usize, max_width: usize, prefix: &str, delimiter: &str, suffix: &str) -> Self;
+}
+impl BreakLine for String {
+    fn break_line(self, min_width: usize, max_width: usize, prefix: &str, delimiter: &str, suffix: &str) -> Self {
+        if self.len() > max_width {
+            let regex = format!("(.{{0,{}}})$|(.{{{},{}}}) |(.*) ",max_width,min_width,max_width);
+            let splitter: Regex = Regex::new(&*regex).unwrap();
+            // gähn!
+            let r = prefix.to_owned() + &splitter.find_iter(&*self).map(|m| m.as_str()).collect::<Vec<&str>>().join(delimiter) + suffix;
+            r
+        } else {
+            self
+        }
+    }
+}
+
