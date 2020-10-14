@@ -1,13 +1,19 @@
-# Cube Parser
+# Cube Parser X (hack)
 
 [![Build Status][github-actions-badge]][github-actions]
 
-A program to extract AF modes on MCU pins from the database files provided with STM32CubeMX.
+A program to extract ~AF modes on MCU pins~ pin-defs grouped by MCU-range/peripheral from the database files provided with STM32CubeMX.
 
 ## Usage
 
-    cargo run features STM32L0 -d /path/to/stm32cubemx/db/mcu/
-    cargo run pin_mappings STM32L0 -d /path/to/stm32cubemx/db/mcu/
+    cargo run -- query STM32F4 -d /path/to/stm32cubemx/db/mcu
+    cargo run -- query STM32F4 -fUSB_OTG_HS -d /path/to/stm32cubemx/db/mcu
+    cargo run -- pin_mappings STM32F4 -d /path/to/stm32cubemx/db/mcu
+    cargo run -- pin_mappings STM32F4 -fFMC -fLTDC -d /path/to/stm32cubemx/db/mcu
+    cargo run -- features STM32F4 -d /path/to/stm32cubemx/db/mcu
+    cargo run -- print_families -d /path/to/stm32cubemx/db/mcu
+
+__TODO: Update dis-ff!__
 
 Under a default Windows install, the database path is `C:\Program Files
 (x86)\STMicroelectronics\STM32Cube\STM32CubeMX\db\mcu`, adjust as appropriate

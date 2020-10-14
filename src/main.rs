@@ -64,13 +64,14 @@ fn main() -> Result<(), String> {
                 .takes_value(true)
                 .required(false),
         )
-        .arg(
-            Arg::with_name("mcu")
-                .short("m")
-                .takes_value(true)
-                .help("The (partial) mcu-definition, e.g. \"STM32F429\"")
-                .required(false),
-        )
+        // TBD
+//        .arg(
+//            Arg::with_name("mcu")
+//                .short("m")
+//                .takes_value(true)
+//                .help("The (partial) mcu-definition, e.g. \"STM32F429\"")
+//                .required(false),
+//        )
         .arg(
             Arg::with_name("af_stems")
                 .short("f")
